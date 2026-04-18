@@ -1,0 +1,5 @@
+/target/
+/dist/
+/multi-monitor-brightness.json
+/multi-monitor-brightness.json.tmp
+*.pdb
