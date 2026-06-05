@@ -3,7 +3,7 @@ use crate::{
     model::{self, Hotkey, Hotkeys, MonitorMemory, Settings},
     monitors::{self, Command, MonitorInfo},
     platform::{self, Action, HotkeyEvent},
-    startup,
+    startup, updater,
 };
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
 use std::{
@@ -38,9 +38,29 @@ struct Display {
 
 #[derive(PartialEq)]
 enum Tab {
-    Displays,
     Evening,
     Settings,
+}
+
+enum UpdateState {
+    Idle,
+    Checking,
+    Current,
+    Available(Box<updater::Release>),
+    Downloading { received: u64, total: u64 },
+    Installing,
+    Error(String),
+}
+impl UpdateState {
+    fn busy(&self) -> bool {
+        matches!(
+            self,
+            Self::Checking | Self::Downloading { .. } | Self::Installing
+        )
+    }
+}
+fn popup_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("brightness-popup")
 }
 
 pub struct MultiMonitorBrightness {
@@ -53,13 +73,21 @@ pub struct MultiMonitorBrightness {
     portable: bool,
     startup_status: startup::Status,
     startup_error: Option<String>,
-    start_hidden: bool,
+    preferences_open: bool,
+    popup_open: bool,
+    popup_had_focus: bool,
+    popup_focus_pending: bool,
+    popup_anchor: Option<platform::Anchor>,
+    popup_details: bool,
+    updates: Option<updater::Service>,
+    update_state: UpdateState,
+    prepared_update: Option<updater::Prepared>,
+    started: Instant,
     monitors: Option<monitors::Controller>,
     hotkeys: Option<platform::HotkeyService>,
     tray: Option<platform::Tray>,
     displays: Vec<Display>,
     scanning: bool,
-    fit_window_once: bool,
     tab: Tab,
     notice: Option<String>,
     shortcut_error: Option<String>,
@@ -79,6 +107,8 @@ impl MultiMonitorBrightness {
         demo: bool,
         portable: bool,
         start_in_tray: bool,
+        open_settings: bool,
+        updated: bool,
     ) -> Self {
         theme(&cc.egui_ctx);
         let mut notice = None;
@@ -146,7 +176,28 @@ impl MultiMonitorBrightness {
         };
         let scanning = monitors.is_some();
         let shortcuts_pending = hotkeys.is_some();
-        let start_hidden = start_in_tray && tray.is_some();
+        let preferences_open = open_settings || tray.is_none();
+        let popup_open = !start_in_tray && !open_settings && tray.is_some();
+        let updates = if demo {
+            None
+        } else {
+            match updater::Service::new(cc.egui_ctx.clone(), portable) {
+                Ok(service) => Some(service),
+                Err(error) => {
+                    notice = Some(error);
+                    None
+                }
+            }
+        };
+        if updated {
+            notice = Some(format!("Updated to version {}.", crate::VERSION));
+        }
+        if popup_open {
+            cc.egui_ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::RequestPaintWhileHidden,
+            );
+        }
         let mut app = Self {
             hotkey_draft: settings.hotkeys.clone(),
             settings,
@@ -157,14 +208,22 @@ impl MultiMonitorBrightness {
             portable,
             startup_status,
             startup_error,
-            start_hidden,
+            preferences_open,
+            popup_open,
+            popup_had_focus: false,
+            popup_focus_pending: popup_open,
+            popup_anchor: None,
+            popup_details: false,
+            updates,
+            update_state: UpdateState::Idle,
+            prepared_update: None,
+            started: Instant::now(),
             monitors,
             hotkeys,
             tray,
             displays: Vec::new(),
             scanning,
-            fit_window_once: true,
-            tab: Tab::Displays,
+            tab: Tab::Settings,
             notice,
             shortcut_error: None,
             shortcuts_pending,
@@ -186,11 +245,13 @@ impl MultiMonitorBrightness {
             match std::env::var("MMB_CAPTURE_TAB").as_deref() {
                 Ok("schedule") => {
                     app.tab = Tab::Evening;
-                    app.fit_window_once = false;
+                    app.preferences_open = true;
+                    app.popup_open = false;
                 }
                 Ok("settings") => {
                     app.tab = Tab::Settings;
-                    app.fit_window_once = false;
+                    app.preferences_open = true;
+                    app.popup_open = false;
                 }
                 _ => {}
             }
@@ -238,6 +299,9 @@ impl MultiMonitorBrightness {
     }
 
     fn queue(&mut self, index: usize, value: u8, manual: bool) {
+        if self.quitting.is_some() {
+            return;
+        }
         let display = &mut self.displays[index];
         if display.info.brightness.is_none() || (display.value == value && display.error.is_none())
         {
@@ -440,17 +504,75 @@ impl MultiMonitorBrightness {
         self.dirty();
     }
 
+    fn show_popup(&mut self, anchor: Option<platform::Anchor>, ctx: &egui::Context) {
+        self.popup_anchor = anchor.or_else(|| self.tray.as_ref().and_then(|t| t.anchor()));
+        self.popup_open = true;
+        self.popup_had_focus = false;
+        self.popup_focus_pending = true;
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::RequestPaintWhileHidden,
+        );
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+
+    fn hide_popup(&mut self, ctx: &egui::Context) {
+        self.popup_open = false;
+        self.flush(true);
+        ctx.send_viewport_cmd_to(popup_id(), egui::ViewportCommand::Visible(false));
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::RequestPaintWhileHidden,
+        );
+    }
+
+    fn open_preferences(&mut self, tab: Tab, ctx: &egui::Context) {
+        self.hide_popup(ctx);
+        self.preferences_open = true;
+        self.tab = tab;
+        for command in [
+            egui::ViewportCommand::Visible(true),
+            egui::ViewportCommand::Minimized(false),
+            egui::ViewportCommand::Focus,
+        ] {
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, command);
+        }
+    }
+
+    fn check_updates(&mut self) {
+        if self.update_state.busy() || self.demo {
+            return;
+        }
+        if let Some(service) = &self.updates {
+            service.check();
+            self.update_state = UpdateState::Checking;
+        } else {
+            self.update_state =
+                UpdateState::Error("Update service is unavailable. Restart the app.".into());
+        }
+    }
+
     fn action(&mut self, action: Action, ctx: &egui::Context) {
         match action {
             Action::Up => self.adjust(self.settings.step as i16),
             Action::Down => self.adjust(-(self.settings.step as i16)),
-            Action::Show => {
-                self.start_hidden = false;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            Action::Show => self.show_popup(None, ctx),
+            Action::TogglePopup(anchor) => {
+                if self.popup_open {
+                    self.hide_popup(ctx);
+                } else {
+                    self.show_popup(Some(anchor), ctx);
+                }
+            }
+            Action::Settings => self.open_preferences(Tab::Settings, ctx),
+            Action::Schedule => self.open_preferences(Tab::Evening, ctx),
+            Action::CheckUpdates => {
+                self.open_preferences(Tab::Settings, ctx);
+                self.check_updates();
             }
             Action::Quit => {
+                self.prepared_update = None;
+                self.popup_open = false;
                 self.quitting = Some(Instant::now());
                 self.flush(true);
             }
@@ -507,13 +629,9 @@ impl MultiMonitorBrightness {
             sun(ui.painter(), rect.center(), 9.0, ACCENT);
             ui.add_space(6.0);
             ui.vertical(|ui| {
+                ui.label(RichText::new("Preferences").size(21.0).strong());
                 ui.label(
                     RichText::new("Multi-Monitor Brightness")
-                        .size(21.0)
-                        .strong(),
-                );
-                ui.label(
-                    RichText::new("External display controls")
                         .color(MUTED)
                         .size(12.0),
                 );
@@ -522,11 +640,7 @@ impl MultiMonitorBrightness {
         ui.add_space(18.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            for (tab, label) in [
-                (Tab::Displays, "Displays"),
-                (Tab::Evening, "Schedule"),
-                (Tab::Settings, "Settings"),
-            ] {
+            for (tab, label) in [(Tab::Evening, "Schedule"), (Tab::Settings, "Settings")] {
                 let active = self.tab == tab;
                 let response = ui.add(
                     egui::Button::new(RichText::new(label).size(13.0).color(if active {
@@ -558,232 +672,243 @@ impl MultiMonitorBrightness {
         let count = (0..self.displays.len())
             .filter(|i| self.included(*i))
             .count();
-        let average = if count > 0 {
-            ((0..self.displays.len())
+        if count > 1 {
+            let average = ((0..self.displays.len())
                 .filter(|i| self.included(*i))
                 .map(|i| self.displays[i].value as u32)
-                .sum::<u32>() as f32
-                / count as f32)
-                .round() as u8
-        } else {
-            0
-        };
-        let mixed = self
+                .sum::<u32>()
+                / count as u32) as u8;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("All linked displays").size(12.0).color(MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(format!("{average}%")).size(20.0));
+                });
+            });
+            let mut value = average;
+            if brightness_slider(ui, &mut value, ui.available_width()).changed() {
+                self.set_all(value);
+            }
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(8.0);
+        }
+        if self.displays.is_empty() {
+            if self.scanning {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Finding displays…");
+                });
+            } else {
+                ui.label("No displays detected");
+            }
+        }
+        let supported = self
             .displays
             .iter()
-            .enumerate()
-            .filter(|(i, _)| self.included(*i))
-            .any(|(_, d)| d.value != average);
-        card(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("Linked displays").size(16.0).strong());
-                    ui.label(
-                        RichText::new(if count == 0 {
-                            "Select a display below".into()
-                        } else {
-                            if count == 1 {
-                                "1 display selected".into()
-                            } else {
-                                format!("{count} displays controlled together")
-                            }
-                        })
-                        .size(12.0)
-                        .color(MUTED),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(if count == 0 {
-                            "—".into()
-                        } else {
-                            format!("{average}%")
-                        })
-                        .size(36.0)
-                        .color(TEXT),
-                    );
-                    if mixed {
-                        ui.label(RichText::new("Average").size(11.0).color(MUTED));
-                    }
-                });
-            });
-            ui.add_space(10.0);
-            let mut value = average;
-            ui.add_enabled_ui(count > 0, |ui| {
+            .filter(|d| d.info.brightness.is_some())
+            .count();
+        for i in 0..self.displays.len() {
+            if self.displays[i].info.brightness.is_none() {
+                continue;
+            }
+            ui.push_id(self.displays[i].info.id.clone(), |ui| {
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("−").size(20.0))
-                                .min_size(Vec2::splat(30.0)),
-                        )
-                        .on_hover_text(format!("Decrease by {}%", self.settings.step))
-                        .clicked()
-                    {
-                        self.adjust(-(self.settings.step as i16));
-                    }
-                    if brightness_slider(ui, &mut value, ui.available_width() - 42.0).changed() {
-                        self.set_all(value);
-                    }
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new("+").size(20.0))
-                                .min_size(Vec2::splat(30.0)),
-                        )
-                        .on_hover_text(format!("Increase by {}%", self.settings.step))
-                        .clicked()
-                    {
-                        self.adjust(self.settings.step as i16);
-                    }
-                });
-            });
-        });
-        ui.add_space(18.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Displays").size(14.0).strong());
-            ui.label(
-                RichText::new(self.displays.len().to_string())
-                    .size(12.0)
-                    .color(MUTED),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(
-                        !self.scanning,
-                        egui::Button::new(
-                            RichText::new(if self.scanning {
-                                "Scanning…"
-                            } else {
-                                "Refresh"
-                            })
-                            .size(12.0)
-                            .color(MUTED),
-                        )
-                        .frame(false),
-                    )
-                    .clicked()
-                    && let Some(m) = &self.monitors
-                {
-                    let _ = m.commands.send(Command::Refresh);
-                    self.scanning = true;
-                }
-            });
-        });
-        ui.add_space(6.0);
-        if self.displays.is_empty() {
-            card(ui, |ui| {
-                if self.scanning {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Detecting displays…");
-                    });
-                } else {
-                    ui.label(RichText::new("No displays detected").strong());
-                    ui.label(
-                        RichText::new("Connect an external display, then select Refresh.")
-                            .color(MUTED),
-                    );
-                }
-            });
-        }
-        for index in 0..self.displays.len() {
-            let supported = self.displays[index].info.brightness.is_some();
-            card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    monitor_glyph(ui, index + 1, supported);
-                    ui.add_space(4.0);
-                    let title_width = (ui.available_width() - 88.0).max(90.0);
-                    ui.vertical(|ui| {
-                        ui.set_width(title_width);
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&self.displays[index].info.name)
-                                    .size(14.0)
-                                    .strong(),
+                    let width = (ui.available_width()
+                        - if supported > 1 || !self.included(i) {
+                            112.0
+                        } else {
+                            58.0
+                        })
+                    .max(60.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(width, 24.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&self.displays[i].info.name).size(13.0),
+                                )
+                                .truncate(),
                             )
-                            .truncate(),
-                        );
-                        ui.label(
-                            RichText::new(&self.displays[index].info.detail)
-                                .size(11.0)
-                                .color(MUTED),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.vertical(|ui| {
-                            if supported {
-                                ui.label(
-                                    RichText::new(format!("{}%", self.displays[index].value))
-                                        .size(21.0)
-                                        .color(TEXT),
-                                );
-                            } else {
-                                ui.label(RichText::new("Unavailable").size(11.0).color(MUTED));
-                            }
-                        });
-                    });
-                });
-                if supported {
-                    ui.add_space(4.0);
-                    let mut value = self.displays[index].value;
-                    if brightness_slider(ui, &mut value, ui.available_width()).changed() {
-                        self.pause_schedule();
-                        self.queue(index, value, true);
-                    }
-                    ui.horizontal(|ui| {
-                        let id = self.displays[index].info.id.clone();
-                        let memory = self.settings.monitors.entry(id).or_default();
+                        },
+                    )
+                    .inner
+                    .on_hover_text(&self.displays[i].info.detail);
+                    if supported > 1 || !self.included(i) {
+                        let memory = self
+                            .settings
+                            .monitors
+                            .entry(self.displays[i].info.id.clone())
+                            .or_default();
                         if ui
                             .checkbox(
                                 &mut memory.included,
-                                RichText::new("Link to shared controls")
-                                    .size(11.0)
-                                    .color(MUTED),
+                                RichText::new("Link").size(10.0).color(MUTED),
                             )
                             .on_hover_text(
-                                "Include this display in the shared slider, hotkeys, and schedule",
+                                "Include in shared controls, hotkeys and the evening schedule",
                             )
                             .changed()
                         {
                             self.dirty();
                         }
-                        if self.displays[index].writing || self.displays[index].queued.is_some() {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(RichText::new("Applying…").size(11.0).color(MUTED));
-                                },
-                            );
-                        }
-                    });
-                    if let Some(error) = &self.displays[index].error {
-                        ui.label(RichText::new(error).size(12.0).color(WARM));
                     }
-                } else {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new("Check DDC/CI in the monitor's menu. Some built-in screens and docks don't support brightness control.")
-                        .color(MUTED).size(11.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(format!("{}%", self.displays[i].value)).size(20.0));
+                    });
+                });
+                let mut value = self.displays[i].value;
+                if brightness_slider(ui, &mut value, ui.available_width()).changed() {
+                    self.pause_schedule();
+                    self.queue(i, value, true);
                 }
+                if let Some(error) = &self.displays[i].error {
+                    ui.label(RichText::new(error).size(11.0).color(WARM));
+                }
+                ui.add_space(10.0);
             });
-            ui.add_space(8.0);
+        }
+        let unavailable = self.displays.len() - supported;
+        if unavailable > 0 {
+            if ui
+                .small_button(format!(
+                    "{unavailable} {} unavailable",
+                    if unavailable == 1 {
+                        "display"
+                    } else {
+                        "displays"
+                    }
+                ))
+                .clicked()
+            {
+                self.popup_details = !self.popup_details;
+            }
+            if self.popup_details {
+                for d in self.displays.iter().filter(|d| d.info.brightness.is_none()) {
+                    ui.label(RichText::new(&d.info.name).size(11.0).color(MUTED));
+                }
+                ui.label(RichText::new("Enable DDC/CI in the monitor's menu, then refresh. Some built-in screens and docks are not supported.").size(11.0).color(MUTED));
+            }
         }
         if self.settings.schedule.enabled {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Schedule").color(TEXT).size(12.0));
-                ui.label(
-                    RichText::new(if self.paused_cycle.is_some() {
-                        "Paused until morning"
-                    } else {
-                        "Evening dimming enabled"
-                    })
-                    .color(MUTED)
-                    .size(12.0),
-                );
-                if self.paused_cycle.is_some() && ui.small_button("Resume").clicked() {
-                    self.paused_cycle = None;
-                }
-            });
+            ui.label(
+                RichText::new(if self.paused_cycle.is_some() {
+                    "Evening dimming paused until morning"
+                } else {
+                    "Evening dimming enabled"
+                })
+                .color(MUTED)
+                .size(10.0),
+            );
         }
+    }
+
+    fn popup_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        if self.popup_focus_pending {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            let size = self.popup_size();
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
+                platform::popup_position(self.popup_anchor, size, &ctx),
+            ));
+            self.popup_focus_pending = false;
+        }
+        let focused = ctx.input(|i| i.viewport().focused);
+        if focused == Some(true) {
+            self.popup_had_focus = true;
+        }
+        let over_tray = self.popup_anchor.is_some_and(platform::cursor_in);
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.viewport().close_requested())
+            || (self.popup_had_focus && focused == Some(false) && !over_tray)
+        {
+            self.hide_popup(&ctx);
+            return;
+        }
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(BG)
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .inner_margin(16)
+                    .corner_radius(10),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Brightness").size(17.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("×").on_hover_text("Close · Esc").clicked() {
+                            self.hide_popup(&ctx);
+                        }
+                        if ui.small_button("Settings").clicked() {
+                            self.open_preferences(Tab::Settings, &ctx);
+                        }
+                    });
+                });
+                ui.add_space(12.0);
+                let footer = 32.0;
+                egui::ScrollArea::vertical()
+                    .max_height((ui.available_height() - footer).max(40.0))
+                    .show(ui, |ui| self.displays_ui(ui));
+                ui.add_space(4.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !self.scanning,
+                            egui::Button::new(RichText::new("Refresh").size(11.0)).frame(false),
+                        )
+                        .clicked()
+                        && let Some(service) = &self.monitors
+                    {
+                        let _ = service.commands.send(Command::Refresh);
+                        self.scanning = true;
+                    }
+                    if ui
+                        .add(egui::Button::new(RichText::new("Schedule").size(11.0)).frame(false))
+                        .clicked()
+                    {
+                        self.open_preferences(Tab::Evening, &ctx);
+                    }
+                    if matches!(self.update_state, UpdateState::Available(_))
+                        && ui.small_button("Update available").clicked()
+                    {
+                        self.open_preferences(Tab::Settings, &ctx);
+                    }
+                    if self.demo {
+                        ui.label(RichText::new("Preview").size(10.0).color(MUTED));
+                    }
+                });
+            });
+        #[cfg(feature = "ui-capture")]
+        if !matches!(
+            std::env::var("MMB_CAPTURE_TAB").as_deref(),
+            Ok("settings" | "schedule")
+        ) {
+            self.capture(&ctx);
+        }
+    }
+
+    fn popup_size(&self) -> Vec2 {
+        let supported = self
+            .displays
+            .iter()
+            .filter(|d| d.info.brightness.is_some())
+            .count();
+        let linked = (0..self.displays.len())
+            .filter(|i| self.included(*i))
+            .count();
+        let mut height = 108.0 + supported.max(1) as f32 * if supported > 1 { 96.0 } else { 70.0 };
+        if linked > 1 {
+            height += 84.0;
+        }
+        if supported < self.displays.len() {
+            height += if self.popup_details { 110.0 } else { 28.0 };
+        }
+        height += self.displays.iter().filter(|d| d.error.is_some()).count() as f32 * 55.0;
+        if self.settings.schedule.enabled {
+            height += 18.0;
+        }
+        Vec2::new(360.0, height.clamp(190.0, 640.0))
     }
 
     fn evening_ui(&mut self, ui: &mut egui::Ui) {
@@ -874,6 +999,8 @@ impl MultiMonitorBrightness {
             });
         });
         ui.add_space(18.0);
+        self.updates_ui(ui);
+        ui.add_space(12.0);
         card(ui, |ui| {
             ui.label(RichText::new("Application").size(17.0).strong());
             ui.add_space(10.0);
@@ -911,18 +1038,6 @@ impl MultiMonitorBrightness {
                 .checkbox(
                     &mut self.settings.restore_on_start,
                     "Restore each display's brightness on launch / reconnect",
-                )
-                .changed()
-            {
-                self.dirty();
-            }
-            if ui
-                .add_enabled(
-                    self.tray.is_some(),
-                    egui::Checkbox::new(
-                        &mut self.settings.close_to_tray,
-                        "Keep running in the system tray when closed",
-                    ),
                 )
                 .changed()
             {
@@ -969,7 +1084,12 @@ impl MultiMonitorBrightness {
                 "key_down",
                 &mut self.hotkey_draft.down,
             );
-            hotkey_editor(ui, "Open window", "key_show", &mut self.hotkey_draft.show);
+            hotkey_editor(
+                ui,
+                "Open brightness",
+                "key_show",
+                &mut self.hotkey_draft.show,
+            );
             ui.add_space(13.0);
             ui.horizontal(|ui| {
                 ui.label("Brightness step");
@@ -1035,28 +1155,68 @@ impl MultiMonitorBrightness {
 impl MultiMonitorBrightness {
     fn tick(&mut self, ctx: &egui::Context) {
         self.receive(ctx);
+        if !self.preferences_open {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::Visible(false),
+            );
+        }
+        if self.popup_open {
+            // The root may never have painted yet. Bootstrap its child from logic,
+            // which keeps running even when every native window is hidden.
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::RequestPaintWhileHidden,
+            );
+        }
+        let updates: Vec<_> = self
+            .updates
+            .as_ref()
+            .map(|s| s.events.try_iter().collect())
+            .unwrap_or_default();
+        for event in updates {
+            match event {
+                updater::Event::Checked(result) => {
+                    self.settings.last_update_check = updater::now();
+                    self.dirty();
+                    self.update_state = match result {
+                        Ok(Some(release)) => UpdateState::Available(release),
+                        Ok(None) => UpdateState::Current,
+                        Err(e) => UpdateState::Error(e),
+                    };
+                }
+                updater::Event::Progress { received, total } => {
+                    self.update_state = UpdateState::Downloading { received, total }
+                }
+                updater::Event::Ready(result) => {
+                    if self.quitting.is_some() {
+                        continue;
+                    }
+                    match result {
+                        Ok(prepared) => {
+                            self.prepared_update = Some(prepared);
+                            self.update_state = UpdateState::Installing;
+                            self.quitting = Some(Instant::now());
+                            self.popup_open = false;
+                        }
+                        Err(error) => self.update_state = UpdateState::Error(error),
+                    }
+                }
+            }
+        }
+        if !self.demo
+            && self.quitting.is_none()
+            && self.settings.check_updates_automatically
+            && self.started.elapsed() > Duration::from_secs(5)
+            && updater::now().saturating_sub(self.settings.last_update_check) >= 86400
+            && matches!(self.update_state, UpdateState::Idle)
+        {
+            self.check_updates();
+        }
         #[cfg(feature = "tray-smoke-test")]
         if let Some(mut smoke) = self.smoke.take() {
             smoke.tick(self, ctx);
             self.smoke = Some(smoke);
-        }
-        if self.fit_window_once && !self.scanning {
-            let rows: f32 = self
-                .displays
-                .iter()
-                .map(|display| {
-                    if display.info.brightness.is_some() {
-                        156.0
-                    } else {
-                        132.0
-                    }
-                })
-                .sum();
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(
-                620.0,
-                (420.0 + rows).clamp(560.0, 880.0),
-            )));
-            self.fit_window_once = false;
         }
         if self.quitting.is_none() {
             self.schedule_tick();
@@ -1076,7 +1236,14 @@ impl MultiMonitorBrightness {
                 || since.elapsed() > Duration::from_secs(5))
         {
             self.save();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if let Some(mut prepared) = self.prepared_update.take()
+                && let Err(error) = updater::handoff(&mut prepared)
+            {
+                self.update_state = UpdateState::Error(error);
+                self.quitting = None;
+                return;
+            }
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
         }
         // A quiet 1 Hz timer keeps schedules running while hidden; active drags get faster feedback.
         let pending = self
@@ -1091,6 +1258,180 @@ impl MultiMonitorBrightness {
     }
 }
 
+impl MultiMonitorBrightness {
+    fn updates_ui(&mut self, ui: &mut egui::Ui) {
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Updates").size(17.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            !self.demo && !self.update_state.busy(),
+                            egui::Button::new("Check for updates"),
+                        )
+                        .clicked()
+                    {
+                        self.check_updates();
+                    }
+                });
+            });
+            ui.add_space(8.0);
+            match &self.update_state {
+                UpdateState::Idle => {
+                    ui.label(
+                        RichText::new(if self.demo {
+                            "Update checks are disabled in preview mode."
+                        } else {
+                            "Updates are downloaded from the official GitHub releases."
+                        })
+                        .size(12.0)
+                        .color(MUTED),
+                    );
+                }
+                UpdateState::Checking => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Checking GitHub…");
+                    });
+                }
+                UpdateState::Current => {
+                    ui.label(RichText::new("You're up to date.").size(13.0).color(MUTED));
+                }
+                UpdateState::Available(release) => {
+                    let release = release.clone();
+                    ui.label(format!("Version {} is available", release.version));
+                    ui.horizontal(|ui| {
+                        if ui.button("Download and install").clicked()
+                            && let Some(service) = &self.updates
+                        {
+                            service.download(release.clone());
+                            self.update_state = UpdateState::Downloading {
+                                received: 0,
+                                total: 0,
+                            };
+                        }
+                        ui.hyperlink_to("Release notes on GitHub", &release.page);
+                    });
+                    ui.label(
+                        RichText::new("The app will restart. Your settings will be kept.")
+                            .size(11.0)
+                            .color(MUTED),
+                    );
+                    if !release.notes.is_empty() {
+                        ui.collapsing("What's new", |ui| {
+                            ui.label(&release.notes);
+                        });
+                    }
+                }
+                UpdateState::Downloading { received, total } => {
+                    let progress = if *total > 0 {
+                        *received as f32 / *total as f32
+                    } else {
+                        0.0
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(progress)
+                            .show_percentage()
+                            .animate(true),
+                    );
+                    ui.label(
+                        RichText::new("Downloading and verifying SHA-256…")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                }
+                UpdateState::Installing => {
+                    ui.label("Restarting to finish the update…");
+                }
+                UpdateState::Error(error) => {
+                    ui.label(RichText::new(error).size(12.0).color(WARM));
+                }
+            }
+            ui.add_space(8.0);
+            if ui
+                .add_enabled(
+                    !self.demo,
+                    egui::Checkbox::new(
+                        &mut self.settings.check_updates_automatically,
+                        "Check automatically once a day",
+                    ),
+                )
+                .changed()
+            {
+                self.dirty();
+            }
+        });
+    }
+
+    #[cfg(feature = "ui-capture")]
+    fn capture(&mut self, ctx: &egui::Context) {
+        match crate::capture::update(ctx) {
+            Ok(true) => self.quitting = Some(Instant::now()),
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("UI capture failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+// Deferred native viewports can render independently while preferences stay hidden.
+// Workers communicate through channels; only UI callbacks access this shared state.
+pub struct Application(std::rc::Rc<std::cell::RefCell<MultiMonitorBrightness>>);
+
+thread_local! {
+    // Native window/tray handles stay on the event-loop thread. The deferred callback
+    // captures no handles and accesses state only on that same thread.
+    static VIEWPORT_STATE: std::cell::RefCell<std::rc::Weak<std::cell::RefCell<MultiMonitorBrightness>>> = const { std::cell::RefCell::new(std::rc::Weak::new()) };
+}
+
+impl Application {
+    pub fn new(state: MultiMonitorBrightness) -> Self {
+        let state = std::rc::Rc::new(std::cell::RefCell::new(state));
+        VIEWPORT_STATE.with(|slot| *slot.borrow_mut() = std::rc::Rc::downgrade(&state));
+        Self(state)
+    }
+}
+
+impl eframe::App for Application {
+    fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.0.borrow_mut().tick(ctx);
+    }
+
+    fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = root.ctx().clone();
+        let builder = {
+            let mut app = self.0.borrow_mut();
+            eframe::App::ui(&mut *app, root, frame);
+            (app.popup_open && app.quitting.is_none()).then(|| {
+                let size = app.popup_size();
+                egui::ViewportBuilder::default()
+                    .with_title(platform::POPUP_TITLE)
+                    .with_decorations(false)
+                    .with_resizable(false)
+                    .with_taskbar(false)
+                    .with_active(true)
+                    .with_window_level(egui::WindowLevel::AlwaysOnTop)
+                    .with_inner_size(size)
+                    .with_position(platform::popup_position(app.popup_anchor, size, &ctx))
+            })
+        };
+        if let Some(builder) = builder {
+            ctx.show_viewport_deferred(popup_id(), builder, |ui, _| {
+                let state = VIEWPORT_STATE.with(|slot| slot.borrow().upgrade());
+                if let Some(state) = state {
+                    state.borrow_mut().popup_ui(ui);
+                }
+            });
+        }
+    }
+
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        eframe::App::on_exit(&mut *self.0.borrow_mut(), gl);
+    }
+}
+
 impl eframe::App for MultiMonitorBrightness {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.tick(ctx);
@@ -1099,19 +1440,20 @@ impl eframe::App for MultiMonitorBrightness {
     fn ui(&mut self, root: &mut egui::Ui, _: &mut eframe::Frame) {
         let context = root.ctx().clone();
         let ctx = &context;
-        // eframe shows its first painted frame even with ViewportBuilder::visible(false).
-        // Apply this in that frame's viewport output; only an explicit Open releases it.
-        if self.start_hidden {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        if !self.preferences_open {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::Visible(false),
+            );
         }
-        if self.quitting.is_none() && ctx.input(|i| i.viewport().close_requested()) {
+        if self.preferences_open
+            && self.quitting.is_none()
+            && ctx.input(|i| i.viewport().close_requested())
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            if self.settings.close_to_tray && self.tray.is_some() {
-                self.flush(true);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            } else {
-                self.action(Action::Quit, ctx);
-            }
+            self.preferences_open = false;
+            self.flush(true);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
         egui::Panel::bottom("footer")
             .frame(
@@ -1180,20 +1522,17 @@ impl eframe::App for MultiMonitorBrightness {
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         match self.tab {
-                            Tab::Displays => self.displays_ui(ui),
                             Tab::Evening => self.evening_ui(ui),
                             Tab::Settings => self.settings_ui(ui),
                         }
                     });
             });
         #[cfg(feature = "ui-capture")]
-        match crate::capture::update(ctx) {
-            Ok(true) => self.quitting = Some(Instant::now()),
-            Ok(false) => {}
-            Err(error) => {
-                eprintln!("UI capture failed: {error}");
-                std::process::exit(1);
-            }
+        if matches!(
+            std::env::var("MMB_CAPTURE_TAB").as_deref(),
+            Ok("settings" | "schedule")
+        ) {
+            self.capture(ctx);
         }
     }
 
@@ -1291,35 +1630,6 @@ fn sun(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32)
             Stroke::new(1.7, color),
         );
     }
-}
-
-fn monitor_glyph(ui: &mut egui::Ui, number: usize, supported: bool) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(34.0, 32.0), egui::Sense::hover());
-    let color = if supported { TEXT } else { MUTED };
-    let screen = egui::Rect::from_min_size(rect.min + Vec2::new(1.0, 1.0), Vec2::new(30.0, 21.0));
-    ui.painter()
-        .rect_stroke(screen, 4, Stroke::new(1.5, color), egui::StrokeKind::Inside);
-    ui.painter().text(
-        screen.center(),
-        egui::Align2::CENTER_CENTER,
-        number,
-        FontId::proportional(13.0),
-        color,
-    );
-    ui.painter().line_segment(
-        [
-            rect.min + Vec2::new(16.0, 23.0),
-            rect.min + Vec2::new(16.0, 28.0),
-        ],
-        Stroke::new(1.5, color),
-    );
-    ui.painter().line_segment(
-        [
-            rect.min + Vec2::new(10.0, 28.0),
-            rect.min + Vec2::new(22.0, 28.0),
-        ],
-        Stroke::new(1.5, color),
-    );
 }
 
 fn brightness_slider(ui: &mut egui::Ui, value: &mut u8, width: f32) -> egui::Response {
@@ -1492,14 +1802,22 @@ mod tests {
             portable: false,
             startup_status: startup::Status::default(),
             startup_error: None,
-            start_hidden: false,
+            preferences_open: false,
+            popup_open: false,
+            popup_had_focus: false,
+            popup_focus_pending: false,
+            popup_anchor: None,
+            popup_details: false,
+            updates: None,
+            update_state: UpdateState::Idle,
+            prepared_update: None,
+            started: Instant::now(),
             monitors: None,
             hotkeys: None,
             tray: None,
             displays: Vec::new(),
             scanning: false,
-            fit_window_once: false,
-            tab: Tab::Displays,
+            tab: Tab::Settings,
             notice: None,
             shortcut_error: None,
             shortcuts_pending: false,

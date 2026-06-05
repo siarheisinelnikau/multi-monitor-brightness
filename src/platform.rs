@@ -64,7 +64,135 @@ pub enum Action {
     Up,
     Down,
     Show,
+    TogglePopup(Anchor),
+    Settings,
+    Schedule,
+    CheckUpdates,
     Quit,
+}
+
+pub const PREFERENCES_TITLE: &str = "Multi-Monitor Brightness — Preferences";
+pub const POPUP_TITLE: &str = "Multi-Monitor Brightness — Brightness";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Anchor {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl From<tray_icon::Rect> for Anchor {
+    fn from(rect: tray_icon::Rect) -> Self {
+        Self {
+            left: rect.position.x as i32,
+            top: rect.position.y as i32,
+            right: (rect.position.x + rect.size.width as f64) as i32,
+            bottom: (rect.position.y + rect.size.height as f64) as i32,
+        }
+    }
+}
+
+pub fn cursor_in(anchor: Anchor) -> bool {
+    let mut point = windows_sys::Win32::Foundation::POINT::default();
+    unsafe {
+        GetCursorPos(&mut point) != 0
+            && point.x >= anchor.left
+            && point.x <= anchor.right
+            && point.y >= anchor.top
+            && point.y <= anchor.bottom
+    }
+}
+
+pub fn popup_position(
+    anchor: Option<Anchor>,
+    size: eframe::egui::Vec2,
+    ctx: &eframe::egui::Context,
+) -> eframe::egui::Pos2 {
+    use windows_sys::Win32::{Foundation::POINT, Graphics::Gdi::*, UI::HiDpi::*};
+    let mut point = POINT::default();
+    unsafe {
+        GetCursorPos(&mut point);
+    }
+    if let Some(a) = anchor {
+        point = POINT {
+            x: (a.left + a.right) / 2,
+            y: (a.top + a.bottom) / 2,
+        };
+    }
+    let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let mut dpi_x = 96;
+    let mut dpi_y = 96;
+    // SAFETY: The monitor comes from Windows and output structs have their documented layouts.
+    unsafe {
+        GetMonitorInfoW(monitor, &mut info);
+        GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+    }
+    let work = info.rcWork;
+    let scale = dpi_x.max(96) as f32 / 96.0;
+    let anchor = anchor.unwrap_or(Anchor {
+        left: work.right - 30,
+        top: work.bottom + 8,
+        right: work.right - 8,
+        bottom: work.bottom + 30,
+    });
+    let (x, y) = place_popup(
+        [work.left, work.top, work.right, work.bottom],
+        anchor,
+        (size.x * scale) as i32,
+        (size.y * scale) as i32,
+    );
+    let current_scale = ctx.native_pixels_per_point().unwrap_or(scale);
+    eframe::egui::pos2(x as f32 / current_scale, y as f32 / current_scale)
+}
+
+fn place_popup(work: [i32; 4], anchor: Anchor, width: i32, height: i32) -> (i32, i32) {
+    let x = ((anchor.left + anchor.right - width) / 2)
+        .clamp(work[0] + 8, (work[2] - width - 8).max(work[0] + 8));
+    let above = anchor.top - height - 8;
+    let y = if above >= work[1] + 8 {
+        above
+    } else {
+        anchor.bottom + 8
+    };
+    (
+        x,
+        y.clamp(work[1] + 8, (work[3] - height - 8).max(work[1] + 8)),
+    )
+}
+
+#[cfg(feature = "tray-smoke-test")]
+pub fn popup_window_state() -> (bool, bool) {
+    unsafe extern "system" fn find(
+        window: windows_sys::Win32::Foundation::HWND,
+        data: isize,
+    ) -> i32 {
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(window, &mut pid);
+        }
+        if pid != std::process::id() {
+            return 1;
+        }
+        let mut text = [0u16; 256];
+        let n = unsafe { GetWindowTextW(window, text.as_mut_ptr(), text.len() as i32) };
+        if String::from_utf16_lossy(&text[..n.max(0) as usize]) == POPUP_TITLE {
+            unsafe {
+                *(data as *mut (bool, bool)) =
+                    (IsWindowVisible(window) != 0, IsIconic(window) != 0);
+            }
+        }
+        1
+    }
+    let mut state = (false, false);
+    unsafe {
+        EnumWindows(Some(find), &mut state as *mut _ as isize);
+    }
+    state
 }
 
 pub enum HotkeyEvent {
@@ -201,7 +329,9 @@ pub struct Tray {
     #[cfg(feature = "tray-smoke-test")]
     menu_handler: std::sync::Arc<dyn Fn(tray_icon::menu::MenuEvent) + Send + Sync>,
     #[cfg(feature = "tray-smoke-test")]
-    menu_ids: [tray_icon::menu::MenuId; 4],
+    menu_ids: [tray_icon::menu::MenuId; 7],
+    #[cfg(feature = "tray-smoke-test")]
+    click_handler: std::sync::Arc<dyn Fn(tray_icon::TrayIconEvent) + Send + Sync>,
 }
 
 impl Tray {
@@ -210,12 +340,18 @@ impl Tray {
             Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
             menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
         };
-        let show = MenuItem::new("Open Multi-Monitor Brightness", true, None);
+        let show = MenuItem::new("Brightness", true, None);
+        let settings = MenuItem::new("Settings", true, None);
+        let schedule = MenuItem::new("Schedule", true, None);
+        let updates = MenuItem::new("Check for updates", true, None);
         let up = MenuItem::new("Brightness +", true, None);
         let down = MenuItem::new("Brightness -", true, None);
         let quit = MenuItem::new("Quit Multi-Monitor Brightness", true, None);
         let menu = Menu::with_items(&[
             &show,
+            &settings,
+            &schedule,
+            &updates,
             &PredefinedMenuItem::separator(),
             &up,
             &down,
@@ -225,6 +361,9 @@ impl Tray {
         .map_err(|e| e.to_string())?;
         let ids = [
             show.id().clone(),
+            settings.id().clone(),
+            schedule.id().clone(),
+            updates.id().clone(),
             up.id().clone(),
             down.id().clone(),
             quit.id().clone(),
@@ -239,10 +378,16 @@ impl Tray {
                 let action = if event.id == ids[0] {
                     Action::Show
                 } else if event.id == ids[1] {
-                    Action::Up
+                    Action::Settings
                 } else if event.id == ids[2] {
-                    Action::Down
+                    Action::Schedule
                 } else if event.id == ids[3] {
+                    Action::CheckUpdates
+                } else if event.id == ids[4] {
+                    Action::Up
+                } else if event.id == ids[5] {
+                    Action::Down
+                } else if event.id == ids[6] {
                     Action::Quit
                 } else {
                     return;
@@ -252,19 +397,21 @@ impl Tray {
             });
         let handler = menu_handler.clone();
         MenuEvent::set_event_handler(Some(move |event| handler(event)));
-        TrayIconEvent::set_event_handler(Some(move |event| {
-            if matches!(
-                event,
-                TrayIconEvent::Click {
+        let click_handler: std::sync::Arc<dyn Fn(TrayIconEvent) + Send + Sync> =
+            std::sync::Arc::new(move |event| {
+                if let TrayIconEvent::Click {
                     button: MouseButton::Left,
                     button_state: MouseButtonState::Up,
+                    rect,
                     ..
+                } = event
+                {
+                    let _ = sender.send(Action::TogglePopup(rect.into()));
+                    ctx.request_repaint();
                 }
-            ) {
-                let _ = sender.send(Action::Show);
-                ctx.request_repaint();
-            }
-        }));
+            });
+        let handler = click_handler.clone();
+        TrayIconEvent::set_event_handler(Some(move |event| handler(event)));
         let icon = Icon::from_rgba(crate::icon::rgba(32), 32, 32).map_err(|e| e.to_string())?;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
@@ -280,7 +427,25 @@ impl Tray {
             menu_handler,
             #[cfg(feature = "tray-smoke-test")]
             menu_ids,
+            #[cfg(feature = "tray-smoke-test")]
+            click_handler,
         })
+    }
+
+    pub fn anchor(&self) -> Option<Anchor> {
+        self._icon.rect().map(Into::into)
+    }
+
+    #[cfg(feature = "tray-smoke-test")]
+    pub fn dispatch_click_for_test(&self) {
+        let rect = self._icon.rect().expect("tray icon rectangle");
+        (self.click_handler)(tray_icon::TrayIconEvent::Click {
+            id: self._icon.id().clone(),
+            position: rect.position,
+            rect,
+            button: tray_icon::MouseButton::Left,
+            button_state: tray_icon::MouseButtonState::Up,
+        });
     }
 
     /// Exercise the exact installed menu callback and IDs in a live-window regression test.
@@ -288,12 +453,55 @@ impl Tray {
     pub fn dispatch_menu_for_test(&self, action: Action) {
         let index = match action {
             Action::Show => 0,
-            Action::Up => 1,
-            Action::Down => 2,
-            Action::Quit => 3,
+            Action::Settings => 1,
+            Action::Schedule => 2,
+            Action::CheckUpdates => 3,
+            Action::Up => 4,
+            Action::Down => 5,
+            Action::Quit => 6,
+            Action::TogglePopup(_) => 0,
         };
         (self.menu_handler)(tray_icon::menu::MenuEvent {
             id: self.menu_ids[index].clone(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popup_stays_in_work_area_for_each_taskbar_edge_and_negative_monitors() {
+        for work in [[0, 0, 1920, 1040], [-2560, -300, 0, 1100]] {
+            for (left, top) in [
+                (work[0], work[1]),
+                (work[2] - 25, work[1]),
+                (work[0], work[3]),
+                (work[2] - 25, work[3]),
+            ] {
+                // Sizes include a 150% DPI popup.
+                for (width, height) in [(360, 412), (540, 618)] {
+                    let (x, y) = place_popup(
+                        work,
+                        Anchor {
+                            left,
+                            top,
+                            right: left + 25,
+                            bottom: top + 25,
+                        },
+                        width,
+                        height,
+                    );
+                    assert!(x >= work[0] + 8 && x + width <= work[2] - 8);
+                    assert!(y >= work[1] + 8 && y + height <= work[3] - 8);
+                    if top == work[1] {
+                        assert!(y > top);
+                    } else {
+                        assert!(y + height < top);
+                    }
+                }
+            }
+        }
     }
 }
