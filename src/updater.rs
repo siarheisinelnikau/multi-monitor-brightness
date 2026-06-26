@@ -25,7 +25,7 @@ use windows_sys::Win32::{
 const REPO: &str = "https://github.com/siarheisinelnikau/multi-monitor-brightness";
 const API: &str =
     "https://api.github.com/repos/siarheisinelnikau/multi-monitor-brightness/releases/latest";
-const EXE: &str = "MultiMonitorBrightness.exe";
+const STAGED_EXE: &str = "MultiMonitorBrightness.exe";
 const MAX_EXE: u64 = 64 * 1024 * 1024;
 const STAGE_PREFIX: &str = ".mmb-update-";
 
@@ -101,6 +101,13 @@ impl Service {
             .map_err(|e| e.to_string())?;
         Ok(Self { sender, events })
     }
+    #[cfg(test)]
+    pub fn test_channel() -> (Self, impl Fn() -> usize) {
+        let (sender, requests) = mpsc::channel();
+        let (_, events) = mpsc::channel();
+        (Self { sender, events }, move || requests.try_iter().count())
+    }
+
     pub fn check(&self) {
         let _ = self.sender.send(Request::Check);
     }
@@ -198,7 +205,7 @@ fn parse_release(json: &str, current: &str) -> Result<Option<Release>, String> {
         }
         Ok(asset.clone())
     };
-    let executable = asset(EXE)?;
+    let executable = asset(&format!("MultiMonitorBrightness-v{version}.exe"))?;
     if executable.size < 1024 || executable.size > MAX_EXE {
         return Err("The release executable has an unexpected size.".into());
     }
@@ -216,11 +223,11 @@ fn parse_release(json: &str, current: &str) -> Result<Option<Release>, String> {
     }))
 }
 
-fn checksum(text: &str) -> Result<String, String> {
+fn checksum(text: &str, executable_name: &str) -> Result<String, String> {
     let mut found = None;
     for line in text.lines() {
         let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() == 2 && fields[1].trim_start_matches('*') == EXE {
+        if fields.len() == 2 && fields[1].trim_start_matches('*') == executable_name {
             if found.is_some()
                 || fields[0].len() != 64
                 || !fields[0].bytes().all(|b| b.is_ascii_hexdigit())
@@ -321,17 +328,16 @@ fn prepare(
     let directory = new_stage(&parent)?;
     let result = (|| {
         let agent = agent();
-        let expected = checksum(&read_text(
-            &agent,
-            &release.checksum.browser_download_url,
-            128 * 1024,
-        )?)?;
+        let expected = checksum(
+            &read_text(&agent, &release.checksum.browser_download_url, 128 * 1024)?,
+            &release.executable.name,
+        )?;
         if let Some(digest) = &release.executable.digest
             && digest != &format!("sha256:{expected}")
         {
             return Err("GitHub's digest and checksum file do not agree.".into());
         }
-        let path = directory.join(EXE);
+        let path = directory.join(STAGED_EXE);
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -390,7 +396,7 @@ fn prepare(
 }
 
 pub fn handoff(prepared: &mut Prepared) -> Result<(), String> {
-    Command::new(prepared.directory.join(EXE))
+    Command::new(prepared.directory.join(STAGED_EXE))
         .arg("--apply-update")
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
@@ -580,7 +586,7 @@ fn cleanup(directory: &Path, parent: &Path) {
     }
     // Only known updater files are removed. Never recursively delete a supplied directory.
     for name in [
-        EXE,
+        STAGED_EXE,
         "ready.exe",
         "previous.exe",
         "restore.exe",
@@ -643,7 +649,7 @@ pub fn smoke_cli(arguments: &[std::ffi::OsString]) -> Result<bool, String> {
         .join("target")
         .join(format!("updater-smoke-{}-{}", std::process::id(), now()));
     fs::create_dir(&parent).map_err(|e| e.to_string())?;
-    let target = parent.join(EXE);
+    let target = parent.join(STAGED_EXE);
     fs::copy(&executable, &target).map_err(|e| e.to_string())?;
     fs::OpenOptions::new()
         .append(true)
@@ -651,7 +657,7 @@ pub fn smoke_cli(arguments: &[std::ffi::OsString]) -> Result<bool, String> {
         .and_then(|mut f| f.write_all(b"old-version-fixture"))
         .map_err(|e| e.to_string())?;
     let directory = new_stage(&parent)?;
-    fs::copy(&executable, directory.join(EXE)).map_err(|e| e.to_string())?;
+    fs::copy(&executable, directory.join(STAGED_EXE)).map_err(|e| e.to_string())?;
     let marker = parent.join("restarted.txt");
     let original_sha = hash(&target)?;
     let new_sha = hash(&executable)?;
@@ -677,7 +683,7 @@ pub fn smoke_cli(arguments: &[std::ffi::OsString]) -> Result<bool, String> {
         serde_json::to_vec(&plan).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    let status = Command::new(directory.join(EXE))
+    let status = Command::new(directory.join(STAGED_EXE))
         .arg("--apply-update")
         .creation_flags(CREATE_NO_WINDOW)
         .status()
@@ -704,8 +710,9 @@ pub fn smoke_cli(arguments: &[std::ffi::OsString]) -> Result<bool, String> {
 mod tests {
     use super::*;
     fn release_json(tag: &str) -> serde_json::Value {
+        let executable = format!("MultiMonitorBrightness-{tag}.exe");
         serde_json::json!({"tag_name":tag,"html_url":format!("{REPO}/releases/tag/{tag}"),"draft":false,"prerelease":false,
-            "assets":[{"name":EXE,"browser_download_url":format!("{REPO}/releases/download/{tag}/{EXE}"),"size":4096},
+            "assets":[{"name":executable,"browser_download_url":format!("{REPO}/releases/download/{tag}/{executable}"),"size":4096},
             {"name":"SHA256SUMS.txt","browser_download_url":format!("{REPO}/releases/download/{tag}/SHA256SUMS.txt"),"size":93}]})
     }
     #[test]
@@ -724,16 +731,25 @@ mod tests {
         json["assets"][0]["browser_download_url"] = "https://example.com/tool.exe".into();
         assert!(parse_release(&json.to_string(), "0.2.0").is_err());
         json = release_json("v9.0.0");
+        json["assets"][0]["name"] = "MultiMonitorBrightness-v8.0.0.exe".into();
+        assert!(parse_release(&json.to_string(), "0.2.0").is_err());
+        json = release_json("v9.0.0");
+        json["assets"][0]["name"] = STAGED_EXE.into();
+        assert!(parse_release(&json.to_string(), "0.2.0").is_err());
+        json = release_json("v9.0.0");
         json["prerelease"] = true.into();
         assert!(parse_release(&json.to_string(), "0.2.0").unwrap().is_none());
     }
     #[test]
-    fn checksum_rejects_missing_ambiguous_and_invalid_entries() {
+    fn checksum_is_bound_to_the_versioned_asset_and_rejects_ambiguous_entries() {
         let hash = "ab".repeat(32);
-        assert_eq!(checksum(&format!("{hash}  {EXE}\n")).unwrap(), hash);
-        assert!(checksum("no checksum").is_err());
-        assert!(checksum(&format!("{hash} {EXE}\n{hash} {EXE}")).is_err());
-        assert!(checksum(&format!("{} {EXE}", "gg".repeat(32))).is_err());
+        let name = "MultiMonitorBrightness-v0.2.1.exe";
+        assert_eq!(checksum(&format!("{hash}  {name}\n"), name).unwrap(), hash);
+        assert!(checksum("no checksum", name).is_err());
+        assert!(checksum(&format!("{hash} {name}\n{hash} {name}"), name).is_err());
+        assert!(checksum(&format!("{} {name}", "gg".repeat(32)), name).is_err());
+        assert!(checksum(&format!("{hash} MultiMonitorBrightness-v0.2.0.exe"), name).is_err());
+        assert!(checksum(&format!("{hash} {STAGED_EXE}"), name).is_err());
     }
     #[test]
     fn replacement_keeps_a_recoverable_backup_and_does_not_touch_preferences() {
@@ -760,7 +776,7 @@ mod tests {
     #[test]
     fn executable_validation_rejects_corruption_truncation_and_wrong_architecture() {
         let directory = new_stage(&std::env::current_dir().unwrap().join("target")).unwrap();
-        let path = directory.join(EXE);
+        let path = directory.join(STAGED_EXE);
         let mut bytes = vec![0u8; 1024];
         bytes[..2].copy_from_slice(b"MZ");
         bytes[60..64].copy_from_slice(&64u32.to_le_bytes());
@@ -788,10 +804,10 @@ mod tests {
         assert!(validate_stage(&parent, &parent).is_err());
         let directory = new_stage(&parent).unwrap();
         assert!(validate_stage(&directory, &parent.join("debug")).is_err());
-        fs::write(directory.join(EXE), b"temporary executable").unwrap();
+        fs::write(directory.join(STAGED_EXE), b"temporary executable").unwrap();
         fs::write(directory.join("keep.txt"), b"unrelated data").unwrap();
         cleanup(&directory, &parent);
-        assert!(!directory.join(EXE).exists());
+        assert!(!directory.join(STAGED_EXE).exists());
         assert_eq!(
             fs::read(directory.join("keep.txt")).unwrap(),
             b"unrelated data"
@@ -804,6 +820,10 @@ mod tests {
     #[ignore = "Downloads and verifies a public GitHub release; never executes or installs it"]
     fn public_release_download_verifies() {
         let release = check_latest("0.0.0").unwrap().expect("published release");
+        eprintln!(
+            "Verifying GitHub release {}: {}",
+            release.version, release.executable.name
+        );
         let prepared = prepare(&release, false, |_, _| {}).unwrap();
         let exe = std::env::current_exe().unwrap();
         cleanup(&prepared.directory, exe.parent().unwrap());
