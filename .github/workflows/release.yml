@@ -59,6 +59,7 @@ jobs:
             const crypto = require('crypto');
             const { owner, repo } = context.repo;
             const tag = process.env.RELEASE_TAG;
+            const executable = `MultiMonitorBrightness-${tag}.exe`;
             let release;
             try {
               release = (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
@@ -74,7 +75,7 @@ jobs:
               })).data;
             }
             for (const [path, name] of [
-              ['dist/MultiMonitorBrightness.exe', 'MultiMonitorBrightness.exe'],
+              [`dist/${executable}`, executable],
               ['dist/SHA256SUMS.txt', 'SHA256SUMS.txt'],
               ['LICENSE', 'LICENSE']
             ]) {

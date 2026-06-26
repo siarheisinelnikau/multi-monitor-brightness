@@ -4,6 +4,28 @@
 
 An unobtrusive Windows utility for controlling external monitor brightness from the keyboard. Built in Rust, with a native desktop interface and a single executable. No installer, WebView, or .NET runtime required.
 
+## Download
+
+Download [**MultiMonitorBrightness-v0.2.1.exe**](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/download/v0.2.1/MultiMonitorBrightness-v0.2.1.exe) from the [latest release](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/latest). Windows 10/11 x64; no installer or additional runtime required. Save it in a writable folder and run it.
+
+**Upgrading from 0.2.0:** download 0.2.1 manually, quit the old app from the tray, and replace your previous executable. Version 0.2.0 expects the old download name and cannot install releases that use versioned filenames. Normal AppData settings are kept. For portable mode, keep the existing `multi-monitor-brightness.json` beside the executable and launch with `--portable`. If you change the installed filename, update **Settings → Application → Use this executable** when Windows startup is enabled. From 0.2.1 onward, in-app updates support the versioned release names and preserve the installed filename and startup path.
+
+## Screenshots
+
+Actual application screenshots captured in preview mode with simulated monitors. Preview mode does not change physical monitor brightness or saved preferences.
+
+**Brightness popup:** click the tray icon to adjust linked displays or each monitor separately.
+
+![Brightness popup with shared and individual monitor sliders](docs/screenshots/brightness.png)
+
+**Settings:** installed version, update checks, Windows startup, and keyboard shortcuts.
+
+![Settings window with Updates, Application, and Keyboard shortcuts](docs/screenshots/settings.png)
+
+**Schedule:** configure evening dimming and morning brightness restoration.
+
+![Schedule window with dimming times, duration, target brightness, and fade preview](docs/screenshots/schedule.png)
+
 ## Features
 
 - A shared slider for all linked displays, plus an individual slider for each screen.
@@ -21,7 +43,7 @@ An unobtrusive Windows utility for controlling external monitor brightness from 
 
 An ordinary launch controls your real monitors. **Preview** appears only when explicitly launched with `--demo`, which uses simulated displays. Exit the preview and run the executable without arguments to use real hardware.
 
-Launch `MultiMonitorBrightness.exe`. Enable **DDC/CI** in your external monitor's on-screen menu if the display reports that brightness control is unavailable.
+Launch `MultiMonitorBrightness-v0.2.1.exe`. Enable **DDC/CI** in your external monitor's on-screen menu if the display reports that brightness control is unavailable.
 
 | Shortcut | Action |
 | --- | --- |
@@ -36,9 +58,9 @@ The shared slider sets linked displays to the same percentage; hotkeys and the t
 Click the tray icon to toggle the brightness popup. Press **Esc** or click outside it to dismiss. Open **Settings** or **Schedule** from the popup or the tray context menu. Closing preferences keeps the utility running in the tray. Use **Quit** in the preferences footer or tray menu to exit.
 
 ```powershell
-.\MultiMonitorBrightness.exe --demo
-.\MultiMonitorBrightness.exe --portable
-.\MultiMonitorBrightness.exe --settings
+.\MultiMonitorBrightness-v0.2.1.exe --demo
+.\MultiMonitorBrightness-v0.2.1.exe --portable
+.\MultiMonitorBrightness-v0.2.1.exe --settings
 ```
 
 Normally, settings live in `%APPDATA%\MultiMonitorBrightness\settings.json`. `--portable` stores `multi-monitor-brightness.json` beside the executable instead. The executable is self-contained; the JSON file holds your preferences. Demo mode neither reads nor writes these settings and does not register global shortcuts.
@@ -53,7 +75,7 @@ The version is always visible at the top of Settings and comes directly from Car
 
 ## Updates
 
-Open **Settings → Updates → Check for updates**, or use the tray context menu. The app checks the latest stable release from this repository; automatic checks run at most once a day while the app is running and can be disabled. Downloads and installation always require clicking **Download and install**.
+Open **Settings → Updates → Check for updates**, or use the tray context menu. The app checks the latest stable release from this repository; a background check runs shortly after each launch by default. Disable **Check for updates on startup** to prevent startup update requests; manual checks remain available. Downloads and installation always require clicking **Download and install**.
 
 The app downloads the single Windows x64 executable and `SHA256SUMS.txt` over HTTPS, verifies the size, SHA-256, and Windows executable format, then finishes pending brightness changes and saves preferences. A helper waits for the current process to exit, replaces the executable with a recoverable backup, and restarts into Settings. The previous executable is removed after the new app initializes. Preferences, portable mode, and the existing autostart path are preserved.
 
@@ -85,7 +107,7 @@ cargo test --locked
 .\scripts\build.ps1
 ```
 
-The build script creates `dist\MultiMonitorBrightness.exe` and its SHA-256 checksum. `.cargo/config.toml` statically links the MSVC runtime. The icon, manifest, and default fonts are embedded. Only standard Windows and graphics-driver DLLs are needed at runtime.
+The build script reads the package version and creates `dist\MultiMonitorBrightness-vVERSION.exe` and `dist\SHA256SUMS.txt`, with the same versioned filename in the checksum. Only one architecture is offered, so the executable has no architecture suffix. `.cargo/config.toml` statically links the MSVC runtime. The icon, manifest, and default fonts are embedded. Only standard Windows and graphics-driver DLLs are needed at runtime.
 
 CI runs formatting, Clippy, tests, and a release build on Windows, then uploads the executable as a build artifact. CI and release builds use the tested Rust 1.96.1 toolchain.
 
@@ -101,7 +123,7 @@ Settings are written to a same-directory temporary file, synced, then replaced. 
 
 ## Status
 
-Current version: 0.2.0. Automated tests cover brightness scaling, schedule boundaries, shortcut validation, persistence, queued monitor operations, popup placement, release selection, and update verification. Hardware compatibility is not yet certified.
+Current version: 0.2.1. Automated tests cover brightness scaling, schedule boundaries, shortcut validation, persistence, queued monitor operations, popup placement, release selection, and update verification. Hardware compatibility is not yet certified.
 
 Live-window regression checks the brightness popup, separate preferences, reopening and minimizing windows, hidden brightness commands, background dimming/restoration, and Quit. Run `scripts\test-tray.ps1` and `scripts\test-tray.ps1 -Startup` on an interactive Windows desktop. The checks use simulated monitors and the installed menu callback, without injecting mouse/keyboard input or changing physical brightness.
 

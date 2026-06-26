@@ -1208,7 +1208,6 @@ impl MultiMonitorBrightness {
             && self.quitting.is_none()
             && self.settings.check_updates_automatically
             && self.started.elapsed() > Duration::from_secs(5)
-            && updater::now().saturating_sub(self.settings.last_update_check) >= 86400
             && matches!(self.update_state, UpdateState::Idle)
         {
             self.check_updates();
@@ -1353,7 +1352,7 @@ impl MultiMonitorBrightness {
                     !self.demo,
                     egui::Checkbox::new(
                         &mut self.settings.check_updates_automatically,
-                        "Check automatically once a day",
+                        "Check for updates on startup",
                     ),
                 )
                 .changed()
@@ -1850,6 +1849,36 @@ mod tests {
             },
         ]);
         app
+    }
+
+    #[test]
+    fn startup_update_requests_respect_opt_out_and_manual_checks_remain_available() {
+        let mut app = app();
+        app.demo = false;
+        app.started = Instant::now() - Duration::from_secs(6);
+        app.settings.check_updates_automatically = false;
+        let (service, requests) = updater::Service::test_channel();
+        app.updates = Some(service);
+        let ctx = egui::Context::default();
+        app.tick(&ctx);
+        assert_eq!(
+            requests(),
+            0,
+            "disabled startup checks must make no request"
+        );
+        app.check_updates();
+        assert_eq!(requests(), 1, "manual checks remain available");
+        app.update_state = UpdateState::Idle;
+        app.settings.check_updates_automatically = true;
+        app.settings.last_update_check = updater::now();
+        app.tick(&ctx);
+        assert_eq!(
+            requests(),
+            1,
+            "each launch checks even after a recent result"
+        );
+        app.tick(&ctx);
+        assert_eq!(requests(), 0, "pending checks must not be duplicated");
     }
 
     #[test]

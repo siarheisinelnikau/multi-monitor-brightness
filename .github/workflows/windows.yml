@@ -30,7 +30,7 @@ jobs:
         with:
           name: MultiMonitorBrightness-windows-x64
           path: |
-            dist/MultiMonitorBrightness.exe
+            dist/MultiMonitorBrightness-v*.exe
             dist/SHA256SUMS.txt
             LICENSE
           if-no-files-found: error
