@@ -33,4 +33,5 @@ jobs:
             dist/MultiMonitorBrightness-v*.exe
             dist/SHA256SUMS.txt
             LICENSE
+            THIRD_PARTY_NOTICES.txt
           if-no-files-found: error

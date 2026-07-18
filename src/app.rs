@@ -5,7 +5,7 @@ use crate::{
     platform::{self, Action, HotkeyEvent},
     startup, updater,
 };
-use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
+use egui::{self, Color32, FontId, RichText, Stroke, Vec2};
 use std::{
     collections::BTreeSet,
     path::PathBuf,
@@ -103,7 +103,7 @@ pub struct MultiMonitorBrightness {
 
 impl MultiMonitorBrightness {
     pub fn new(
-        cc: &eframe::CreationContext<'_>,
+        cc: &crate::host::CreationContext,
         demo: bool,
         portable: bool,
         start_in_tray: bool,
@@ -111,6 +111,10 @@ impl MultiMonitorBrightness {
         updated: bool,
     ) -> Self {
         theme(&cc.egui_ctx);
+        #[cfg(feature = "ui-capture")]
+        if demo {
+            crate::capture::configure_scale(&cc.egui_ctx);
+        }
         let mut notice = None;
         let mut save_blocked = false;
         let config_path = if demo {
@@ -178,6 +182,7 @@ impl MultiMonitorBrightness {
         let shortcuts_pending = hotkeys.is_some();
         let preferences_open = open_settings || tray.is_none();
         let popup_open = !start_in_tray && !open_settings && tray.is_some();
+        let popup_anchor = tray.as_ref().and_then(|tray| tray.anchor());
         let updates = if demo {
             None
         } else {
@@ -212,7 +217,7 @@ impl MultiMonitorBrightness {
             popup_open,
             popup_had_focus: false,
             popup_focus_pending: popup_open,
-            popup_anchor: None,
+            popup_anchor,
             popup_details: false,
             updates,
             update_state: UpdateState::Idle,
@@ -685,7 +690,18 @@ impl MultiMonitorBrightness {
                 });
             });
             let mut value = average;
-            if brightness_slider(ui, &mut value, ui.available_width()).changed() {
+            let response = brightness_slider(ui, &mut value, ui.available_width());
+            #[cfg(feature = "render-smoke-test")]
+            {
+                let viewport = ui.ctx().viewport_id();
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(
+                        egui::Id::unique("render-probe-slider"),
+                        (viewport, response.rect, value),
+                    )
+                });
+            }
+            if response.changed() {
                 self.set_all(value);
             }
             ui.add_space(6.0);
@@ -809,7 +825,7 @@ impl MultiMonitorBrightness {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             let size = self.popup_size();
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(
-                platform::popup_position(self.popup_anchor, size, &ctx),
+                platform::popup_geometry(self.popup_anchor, size, &ctx).0,
             ));
             self.popup_focus_pending = false;
         }
@@ -1155,20 +1171,6 @@ impl MultiMonitorBrightness {
 impl MultiMonitorBrightness {
     fn tick(&mut self, ctx: &egui::Context) {
         self.receive(ctx);
-        if !self.preferences_open {
-            ctx.send_viewport_cmd_to(
-                egui::ViewportId::ROOT,
-                egui::ViewportCommand::Visible(false),
-            );
-        }
-        if self.popup_open {
-            // The root may never have painted yet. Bootstrap its child from logic,
-            // which keeps running even when every native window is hidden.
-            ctx.send_viewport_cmd_to(
-                egui::ViewportId::ROOT,
-                egui::ViewportCommand::RequestPaintWhileHidden,
-            );
-        }
         let updates: Vec<_> = self
             .updates
             .as_ref()
@@ -1249,11 +1251,14 @@ impl MultiMonitorBrightness {
             .displays
             .iter()
             .any(|d| d.queued.is_some() || d.writing);
-        ctx.request_repaint_after(if pending || self.quitting.is_some() {
-            Duration::from_millis(60)
-        } else {
-            Duration::from_secs(1)
-        });
+        ctx.request_repaint_after_for(
+            if pending || self.quitting.is_some() {
+                Duration::from_millis(60)
+            } else {
+                Duration::from_secs(1)
+            },
+            egui::ViewportId::ROOT,
+        );
     }
 }
 
@@ -1393,27 +1398,29 @@ impl Application {
     }
 }
 
-impl eframe::App for Application {
-    fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+impl crate::host::App for Application {
+    fn logic(&mut self, ctx: &egui::Context) {
         self.0.borrow_mut().tick(ctx);
     }
 
-    fn ui(&mut self, root: &mut egui::Ui, frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
         let builder = {
             let mut app = self.0.borrow_mut();
-            eframe::App::ui(&mut *app, root, frame);
+            app.ui(root);
             (app.popup_open && app.quitting.is_none()).then(|| {
-                let size = app.popup_size();
+                let (position, size) =
+                    platform::popup_geometry(app.popup_anchor, app.popup_size(), &ctx);
                 egui::ViewportBuilder::default()
                     .with_title(platform::POPUP_TITLE)
+                    .with_visible(true)
                     .with_decorations(false)
                     .with_resizable(false)
                     .with_taskbar(false)
                     .with_active(true)
                     .with_window_level(egui::WindowLevel::AlwaysOnTop)
                     .with_inner_size(size)
-                    .with_position(platform::popup_position(app.popup_anchor, size, &ctx))
+                    .with_position(position)
             })
         };
         if let Some(builder) = builder {
@@ -1426,24 +1433,19 @@ impl eframe::App for Application {
         }
     }
 
-    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
-        eframe::App::on_exit(&mut *self.0.borrow_mut(), gl);
+    fn shutdown(&mut self) {
+        self.0.borrow_mut().shutdown();
     }
 }
 
-impl eframe::App for MultiMonitorBrightness {
-    fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        self.tick(ctx);
-    }
-
-    fn ui(&mut self, root: &mut egui::Ui, _: &mut eframe::Frame) {
+impl MultiMonitorBrightness {
+    fn ui(&mut self, root: &mut egui::Ui) {
         let context = root.ctx().clone();
         let ctx = &context;
+        #[cfg(feature = "ui-capture")]
+        crate::capture::configure_viewport(ctx);
         if !self.preferences_open {
-            ctx.send_viewport_cmd_to(
-                egui::ViewportId::ROOT,
-                egui::ViewportCommand::Visible(false),
-            );
+            return;
         }
         if self.preferences_open
             && self.quitting.is_none()
@@ -1535,7 +1537,7 @@ impl eframe::App for MultiMonitorBrightness {
         }
     }
 
-    fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+    fn shutdown(&mut self) {
         #[cfg(feature = "tray-smoke-test")]
         if let Some(smoke) = &self.smoke {
             smoke.finish();

@@ -1,4 +1,3 @@
-use eframe::egui;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
