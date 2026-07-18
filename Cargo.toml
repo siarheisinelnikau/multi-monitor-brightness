@@ -1,6 +1,6 @@
 [package]
 name = "multi-monitor-brightness"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.95"
 description = "Keyboard-first brightness control for external monitors"
@@ -13,9 +13,15 @@ build = "build.rs"
 ui-capture = ["dep:png"]
 tray-smoke-test = []
 updater-smoke-test = []
+render-smoke-test = []
 
 [dependencies]
-eframe = { version = "=0.37.0", default-features = false, features = ["default_fonts", "glow"] }
+egui = { version = "=0.37.0", default-features = false, features = ["default_fonts"] }
+egui-winit = { version = "=0.37.0", default-features = false, features = ["clipboard", "links"] }
+egui_software_backend = { path = "vendor/egui_software_backend", default-features = false, features = ["std"] }
+softbuffer = { version = "=0.4.8", default-features = false }
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
+bytemuck = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = "1.0.28"
@@ -39,3 +45,7 @@ lto = "thin"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# The CPU rasterizer must also be usable in local debug previews.
+[profile.dev.package.egui_software_backend]
+opt-level = 3

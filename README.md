@@ -6,9 +6,9 @@ An unobtrusive Windows utility for controlling external monitor brightness from 
 
 ## Download
 
-Download [**MultiMonitorBrightness-v0.2.1.exe**](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/download/v0.2.1/MultiMonitorBrightness-v0.2.1.exe) from the [latest release](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/latest). Windows 10/11 x64; no installer or additional runtime required. Save it in a writable folder and run it.
+Download [**MultiMonitorBrightness-v0.2.2.exe**](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/download/v0.2.2/MultiMonitorBrightness-v0.2.2.exe) from the [latest release](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/latest). Windows 10/11 x64; no installer or additional runtime required. Save it in a writable folder and run it.
 
-**Upgrading from 0.2.0:** download 0.2.1 manually, quit the old app from the tray, and replace your previous executable. Version 0.2.0 expects the old download name and cannot install releases that use versioned filenames. Normal AppData settings are kept. For portable mode, keep the existing `multi-monitor-brightness.json` beside the executable and launch with `--portable`. If you change the installed filename, update **Settings → Application → Use this executable** when Windows startup is enabled. From 0.2.1 onward, in-app updates support the versioned release names and preserve the installed filename and startup path.
+**Upgrading from 0.2.0:** download the latest release manually, quit the old app from the tray, and replace your previous executable. Version 0.2.0 expects the old download name and cannot install releases that use versioned filenames. Normal AppData settings are kept. For portable mode, keep the existing `multi-monitor-brightness.json` beside the executable and launch with `--portable`. If you change the installed filename, update **Settings → Application → Use this executable** when Windows startup is enabled. From 0.2.1 onward, in-app updates support the versioned release names and preserve the installed filename and startup path.
 
 ## Screenshots
 
@@ -28,6 +28,8 @@ Actual application screenshots captured in preview mode with simulated monitors.
 
 ## Features
 
+- CPU rendering with Windows GDI presentation; no OpenGL or DirectX rendering backend.
+- Reactive rendering: hidden windows skip painting, unchanged scenes keep their cached bitmap.
 - A shared slider for all linked displays, plus an individual slider for each screen.
 - Global, customizable brightness shortcuts. Relative changes preserve differences between displays.
 - Smooth evening dimming with configurable start time, duration, target, and morning restoration.
@@ -43,7 +45,7 @@ Actual application screenshots captured in preview mode with simulated monitors.
 
 An ordinary launch controls your real monitors. **Preview** appears only when explicitly launched with `--demo`, which uses simulated displays. Exit the preview and run the executable without arguments to use real hardware.
 
-Launch `MultiMonitorBrightness-v0.2.1.exe`. Enable **DDC/CI** in your external monitor's on-screen menu if the display reports that brightness control is unavailable.
+Launch `MultiMonitorBrightness-v0.2.2.exe`. Enable **DDC/CI** in your external monitor's on-screen menu if the display reports that brightness control is unavailable.
 
 | Shortcut | Action |
 | --- | --- |
@@ -58,9 +60,9 @@ The shared slider sets linked displays to the same percentage; hotkeys and the t
 Click the tray icon to toggle the brightness popup. Press **Esc** or click outside it to dismiss. Open **Settings** or **Schedule** from the popup or the tray context menu. Closing preferences keeps the utility running in the tray. Use **Quit** in the preferences footer or tray menu to exit.
 
 ```powershell
-.\MultiMonitorBrightness-v0.2.1.exe --demo
-.\MultiMonitorBrightness-v0.2.1.exe --portable
-.\MultiMonitorBrightness-v0.2.1.exe --settings
+.\MultiMonitorBrightness-v0.2.2.exe --demo
+.\MultiMonitorBrightness-v0.2.2.exe --portable
+.\MultiMonitorBrightness-v0.2.2.exe --settings
 ```
 
 Normally, settings live in `%APPDATA%\MultiMonitorBrightness\settings.json`. `--portable` stores `multi-monitor-brightness.json` beside the executable instead. The executable is self-contained; the JSON file holds your preferences. Demo mode neither reads nor writes these settings and does not register global shortcuts.
@@ -89,7 +91,7 @@ Changing brightness manually pauses the schedule for the current evening. Use **
 
 ## Compatibility
 
-- Windows 10/11, x86-64, with a working OpenGL graphics driver. Internet access is needed only for update checks/downloads.
+- Windows 10/11, x86-64. The application draws on the CPU and presents through Windows GDI. Internet access is needed only for update checks/downloads.
 - External displays that expose brightness through DDC/CI. The backend uses `GetMonitorBrightness` / `SetMonitorBrightness`, with a VCP `0x10` fallback.
 - Built-in laptop panels, displays with DDC/CI disabled, and some docks, KVMs, or adapters may be unavailable. There is no software overlay or WMI fallback.
 - Monitor preferences are keyed by the Windows monitor interface path, with a display-path fallback. Moving a display to a different port or adapter can create a new identity. Mirrored displays may expose ambiguous identities.
@@ -117,17 +119,21 @@ Optional read-only hardware check (requires a live desktop): `cargo test read_ha
 
 `src/monitors.rs` owns all physical monitor handles on a dedicated worker thread and releases them on refresh or shutdown. Writes are coalesced per monitor, and revision numbers keep delayed results from overwriting newer slider positions. Failed changes leave the last successful manual brightness intact. A separate thread registers and receives Win32 global hotkeys; egui handles the window and tray actions.
 
-Tray commands, hotkeys, monitor responses, saving, and schedules run in `eframe::App::logic`, independently of visible UI rendering. Brightness uses a separate deferred native viewport, so it can stay responsive while preferences are hidden. This requires eframe 0.37: older versions could stop processing pending commands when the Windows window was hidden in the tray.
+`src/host.rs` hosts egui with winit, CPU rasterization, and Windows GDI bitmap presentation. The Windows dependency tree contains no eframe, OpenGL, glutin, or wgpu renderer. Tray commands, hotkeys, monitor responses, saving, and schedules run independently of visible painting. Hidden windows do not rasterize; unchanged visible scenes skip rasterization and presentation. Windows expose events restore the retained bitmap. Pointer and repaint bursts coalesce to the current monitor's refresh period (60 Hz fallback when unavailable). The event loop waits for input or scheduled work rather than polling continuously.
+
+Font and image uploads from hidden UI passes remain pending until the next visible paint. The shared CPU renderer retains its textures across the separate brightness and preferences windows. The vendored rasterizer's original license files are in `vendor/egui_software_backend`; binary notices are in `THIRD_PARTY_NOTICES.txt`.
 
 Settings are written to a same-directory temporary file, synced, then replaced. An unreadable settings file is preserved and automatic saving is paused until it is fixed or moved. The evening scheduler derives its output from manual levels rather than progressively modifying its own previous output.
 
 ## Status
 
-Current version: 0.2.1. Automated tests cover brightness scaling, schedule boundaries, shortcut validation, persistence, queued monitor operations, popup placement, release selection, and update verification. Hardware compatibility is not yet certified.
+Current version: 0.2.2. Automated tests cover brightness scaling, schedule boundaries, shortcut validation, persistence, queued monitor operations, popup placement, release selection, and update verification. Hardware compatibility is not yet certified.
 
 Live-window regression checks the brightness popup, separate preferences, reopening and minimizing windows, hidden brightness commands, background dimming/restoration, and Quit. Run `scripts\test-tray.ps1` and `scripts\test-tray.ps1 -Startup` on an interactive Windows desktop. The checks use simulated monitors and the installed menu callback, without injecting mouse/keyboard input or changing physical brightness.
 
 Run `scripts\test-updater.ps1` for a native update regression using an isolated copy in `target`: it waits for a running executable to exit, replaces it, checks the backup, restarts the new copy, and cleans up its own fixture. CI runs this regression too. The optional network check `cargo test public_release_download_verifies -- --ignored --nocapture` downloads and verifies the latest public release without installing or executing it.
+
+For a release-mode CPU renderer regression on an interactive Windows desktop, run `scripts\test-renderer.ps1`. It uses three seconds of warm-up and five seconds of measurement for Settings, the brightness popup, hidden startup, and a simulated slider drag. Native pointer input is ignored only in this opt-in benchmark, so desktop activity does not contaminate the idle workload. It verifies zero idle rasterizations, zero hidden paints, changing slider frames, and absence of OpenGL/DirectX modules. JSON results stay in `dist/render-tests`. This is a controlled input test; it does not establish subjective mouse latency on every machine.
 
 ## Short description
 
@@ -137,4 +143,4 @@ Keyboard-first brightness control for external monitors, with customizable hotke
 
 MIT. See [LICENSE](LICENSE).
 
-API references: [Windows monitor configuration](https://learn.microsoft.com/en-us/windows/win32/monitor/using-the-low-level-monitor-configuration-functions), [global hotkeys](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerhotkey), and [eframe](https://docs.rs/eframe/0.37.0/eframe/).
+API references: [Windows monitor configuration](https://learn.microsoft.com/en-us/windows/win32/monitor/using-the-low-level-monitor-configuration-functions), [global hotkeys](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerhotkey), [egui-winit](https://docs.rs/egui-winit/0.37.0/egui_winit/), and [softbuffer](https://docs.rs/softbuffer/0.4.8/softbuffer/).

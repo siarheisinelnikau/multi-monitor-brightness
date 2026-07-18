@@ -9,6 +9,7 @@ mod app;
 #[cfg(feature = "ui-capture")]
 mod capture;
 mod config;
+mod host;
 mod icon;
 mod model;
 mod monitors;
@@ -22,6 +23,11 @@ fn main() {
     if let Err(error) = run() {
         #[cfg(feature = "updater-smoke-test")]
         if std::env::var_os("MMB_UPDATER_SMOKE").is_some() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        #[cfg(feature = "render-smoke-test")]
+        if std::env::var_os("MMB_RENDER_TEST").is_some() {
             eprintln!("{error}");
             std::process::exit(1);
         }
@@ -78,39 +84,30 @@ fn run() -> Result<(), String> {
         }
         return Err("Multi-Monitor Brightness is already running. Open it from the sun icon in the system tray.".into());
     };
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title(platform::PREFERENCES_TITLE)
-            .with_inner_size([620.0, 780.0])
-            .with_visible(open_settings)
-            .with_min_inner_size([500.0, 520.0])
-            .with_icon(eframe::egui::IconData {
-                rgba: icon::rgba(64),
-                width: 64,
-                height: 64,
-            }),
-        renderer: eframe::Renderer::Glow,
-        centered: true,
-        ..Default::default()
-    };
-    eframe::run_native(
-        "Multi-Monitor Brightness",
-        options,
-        Box::new(move |cc| {
-            let app = app::MultiMonitorBrightness::new(
-                cc,
-                demo,
-                portable,
-                start_in_tray,
-                open_settings,
-                updated,
-            );
-            if let Some(directory) = cleanup {
-                updater::cleanup_after_update(directory);
-            }
-            Ok(Box::new(app::Application::new(app)))
-        }),
-    )
-    .map_err(|e| format!("Could not open Multi-Monitor Brightness: {e}"))?;
+    let preferences_size = platform::preferences_size(1.0);
+    let viewport = egui::ViewportBuilder::default()
+        .with_title(platform::PREFERENCES_TITLE)
+        .with_inner_size(preferences_size)
+        .with_visible(open_settings)
+        .with_min_inner_size(preferences_size.min(egui::vec2(500.0, 360.0)))
+        .with_icon(egui::IconData {
+            rgba: icon::rgba(64),
+            width: 64,
+            height: 64,
+        });
+    host::run(viewport, move |cc| {
+        let app = app::MultiMonitorBrightness::new(
+            cc,
+            demo,
+            portable,
+            start_in_tray,
+            open_settings,
+            updated,
+        );
+        if let Some(directory) = cleanup {
+            updater::cleanup_after_update(directory);
+        }
+        Ok(Box::new(app::Application::new(app)))
+    })?;
     Ok(())
 }
