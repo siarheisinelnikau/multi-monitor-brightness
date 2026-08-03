@@ -478,7 +478,10 @@ impl Tray {
             });
         let handler = click_handler.clone();
         TrayIconEvent::set_event_handler(Some(move |event| handler(event)));
-        let icon = Icon::from_rgba(crate::icon::rgba(32), 32, 32).map_err(|e| e.to_string())?;
+        // Avoid shrinking the executable's padded artwork into the notification area.
+        let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 64) as u32;
+        let icon =
+            Icon::from_rgba(crate::icon::tray_rgba(size), size, size).map_err(|e| e.to_string())?;
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
