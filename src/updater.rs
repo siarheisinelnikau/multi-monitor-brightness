@@ -13,7 +13,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, WAIT_OBJECT_0},
+    Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    },
     Storage::FileSystem::ReplaceFileW,
     System::Threading::{
         CREATE_NO_WINDOW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
@@ -435,14 +437,17 @@ fn replace(target: &Path, ready: &Path, backup: &Path) -> Result<(), String> {
 }
 
 fn wait_for_parent(plan: &Plan) -> Result<(), String> {
+    let access = PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
+    #[cfg(feature = "updater-smoke-test")]
+    let access =
+        if plan.smoke_marker.is_some() && std::env::var_os("MMB_UPDATER_QUERY_DENIED").is_some() {
+            // Exercise a real Windows query failure while retaining the ability to wait.
+            PROCESS_SYNCHRONIZE
+        } else {
+            access
+        };
     // SAFETY: Open only the specified application process for querying and waiting, never termination.
-    let process = unsafe {
-        OpenProcess(
-            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
-            0,
-            plan.parent_pid,
-        )
-    };
+    let process = unsafe { OpenProcess(access, 0, plan.parent_pid) };
     if process.is_null() {
         if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER {
             return Ok(());
@@ -457,13 +462,22 @@ fn wait_for_parent(plan: &Plan) -> Result<(), String> {
         let mut path = vec![0u16; 32768];
         let mut length = path.len() as u32;
         if unsafe { QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut length) } == 0 {
-            if unsafe { WaitForSingleObject(process, 0) } == WAIT_OBJECT_0 {
-                return Ok(());
+            let error = std::io::Error::last_os_error();
+            #[cfg(feature = "updater-smoke-test")]
+            if plan.smoke_marker.is_some() && std::env::var_os("MMB_UPDATER_QUERY_DENIED").is_some()
+            {
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32)
+                );
+                eprintln!("PASS native process query returned access denied");
             }
-            return Err(format!(
-                "Could not verify the application being updated: {}",
-                std::io::Error::last_os_error()
-            ));
+            // Windows may stop exposing the image name before process teardown signals
+            // the handle. Require actual termination, then verify the installed hash
+            // in apply_update before touching any files.
+            return wait_for_exit(process, 45000).map_err(|wait_error| {
+                format!("Could not verify the application being updated: {error}. {wait_error}")
+            });
         }
         let path =
             PathBuf::from(String::from_utf16(&path[..length as usize]).map_err(|e| e.to_string())?);
@@ -472,15 +486,24 @@ fn wait_for_parent(plan: &Plan) -> Result<(), String> {
         {
             return Err("The update process does not match the target executable.".into());
         }
-        if unsafe { WaitForSingleObject(process, 45000) } != WAIT_OBJECT_0 {
-            return Err("The application did not exit in time. Nothing was replaced.".into());
-        }
-        Ok(())
+        wait_for_exit(process, 45000)
     })();
     unsafe {
         CloseHandle(process);
     }
     result
+}
+
+fn wait_for_exit(process: HANDLE, timeout_ms: u32) -> Result<(), String> {
+    // SAFETY: The caller owns this process handle until the wait returns.
+    match unsafe { WaitForSingleObject(process, timeout_ms) } {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => Err("The application did not exit in time. Nothing was replaced.".into()),
+        _ => Err(format!(
+            "Could not wait for the application to exit: {}",
+            std::io::Error::last_os_error()
+        )),
+    }
 }
 
 pub fn apply_update() -> Result<(), String> {
@@ -642,6 +665,13 @@ pub fn smoke_cli(arguments: &[std::ffi::OsString]) -> Result<bool, String> {
     if arguments.len() != 1 || arguments[0] != "--test-updater" {
         return Ok(false);
     }
+    smoke_replacement(false)?;
+    smoke_replacement(true)?;
+    Ok(true)
+}
+
+#[cfg(feature = "updater-smoke-test")]
+fn smoke_replacement(query_denied: bool) -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let parent = std::env::current_dir()
         .map_err(|e| e.to_string())?
@@ -682,11 +712,14 @@ pub fn smoke_cli(arguments: &[std::ffi::OsString]) -> Result<bool, String> {
         serde_json::to_vec(&plan).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    let status = Command::new(directory.join(STAGED_EXE))
+    let mut helper = Command::new(directory.join(STAGED_EXE));
+    helper
         .arg("--apply-update")
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .map_err(|e| e.to_string())?;
+        .creation_flags(CREATE_NO_WINDOW);
+    if query_denied {
+        helper.env("MMB_UPDATER_QUERY_DENIED", "1");
+    }
+    let status = helper.status().map_err(|e| e.to_string())?;
     let _ = old.wait();
     if !status.success()
         || hash(&target)? != new_sha
@@ -700,9 +733,9 @@ pub fn smoke_cli(arguments: &[std::ffi::OsString]) -> Result<bool, String> {
     fs::remove_file(marker).map_err(|e| e.to_string())?;
     fs::remove_dir(parent).map_err(|e| e.to_string())?;
     println!(
-        "PASS wait for running executable, verified replacement, old-version backup, restart, and isolated cleanup"
+        "PASS wait for running executable, verified replacement, old-version backup, restart, and isolated cleanup (query denied: {query_denied})"
     );
-    Ok(true)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -714,6 +747,35 @@ mod tests {
             "assets":[{"name":executable,"browser_download_url":format!("{REPO}/releases/download/{tag}/{executable}"),"size":4096},
             {"name":"SHA256SUMS.txt","browser_download_url":format!("{REPO}/releases/download/{tag}/SHA256SUMS.txt"),"size":93}]})
     }
+
+    #[test]
+    fn a_running_process_cannot_be_treated_as_exited() {
+        let process = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() };
+        assert!(
+            wait_for_exit(process, 0)
+                .unwrap_err()
+                .contains("did not exit")
+        );
+    }
+
+    #[test]
+    fn a_queryable_process_must_match_the_update_target() {
+        let plan = Plan {
+            target: std::env::current_dir().unwrap().join("Cargo.toml"),
+            parent_pid: std::process::id(),
+            original_sha: String::new(),
+            new_sha: String::new(),
+            version: crate::VERSION.into(),
+            portable: false,
+            smoke_marker: None,
+        };
+        assert!(
+            wait_for_parent(&plan)
+                .unwrap_err()
+                .contains("does not match the target executable")
+        );
+    }
+
     #[test]
     fn stable_release_selection_is_semantic_and_repo_bound() {
         assert!(
