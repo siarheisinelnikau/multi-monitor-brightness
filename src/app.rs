@@ -74,6 +74,7 @@ pub struct MultiMonitorBrightness {
     startup_status: startup::Status,
     startup_error: Option<String>,
     preferences_open: bool,
+    preferences_position_pending: bool,
     popup_open: bool,
     popup_had_focus: bool,
     popup_focus_pending: bool,
@@ -214,6 +215,7 @@ impl MultiMonitorBrightness {
             startup_status,
             startup_error,
             preferences_open,
+            preferences_position_pending: preferences_open,
             popup_open,
             popup_had_focus: false,
             popup_focus_pending: popup_open,
@@ -532,6 +534,14 @@ impl MultiMonitorBrightness {
     }
 
     fn open_preferences(&mut self, tab: Tab, ctx: &egui::Context) {
+        let minimized = ctx.input(|input| {
+            input
+                .raw
+                .viewports
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|viewport| viewport.minimized == Some(true))
+        });
+        self.preferences_position_pending |= !self.preferences_open || minimized;
         self.hide_popup(ctx);
         self.preferences_open = true;
         self.tab = tab;
@@ -1447,6 +1457,24 @@ impl MultiMonitorBrightness {
         if !self.preferences_open {
             return;
         }
+        if self.preferences_position_pending {
+            self.preferences_position_pending = false;
+            if !ctx.input(|input| input.viewport().maximized == Some(true)) {
+                let anchor = self
+                    .tray
+                    .as_ref()
+                    .and_then(|tray| tray.anchor())
+                    .or(self.popup_anchor);
+                let (position, size) = platform::preferences_geometry(anchor, ctx);
+                for command in [
+                    egui::ViewportCommand::OuterPosition(position),
+                    egui::ViewportCommand::MinInnerSize(size.min(egui::vec2(500.0, 360.0))),
+                    egui::ViewportCommand::InnerSize(size),
+                ] {
+                    ctx.send_viewport_cmd(command);
+                }
+            }
+        }
         if self.preferences_open
             && self.quitting.is_none()
             && ctx.input(|i| i.viewport().close_requested())
@@ -1804,6 +1832,7 @@ mod tests {
             startup_status: startup::Status::default(),
             startup_error: None,
             preferences_open: false,
+            preferences_position_pending: false,
             popup_open: false,
             popup_had_focus: false,
             popup_focus_pending: false,

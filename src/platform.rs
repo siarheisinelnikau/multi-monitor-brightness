@@ -183,6 +183,52 @@ pub fn preferences_size(zoom: f32) -> egui::Vec2 {
     )
 }
 
+pub fn preferences_geometry(
+    anchor: Option<Anchor>,
+    ctx: &egui::Context,
+) -> (egui::Pos2, egui::Vec2) {
+    let area = monitor_area(anchor);
+    let scale = area.scale * ctx.zoom_factor();
+    let chrome = ctx.input(|input| {
+        input
+            .viewport()
+            .outer_rect
+            .zip(input.viewport().inner_rect)
+            .map(|(outer, inner)| (outer.size() - inner.size()).max(egui::Vec2::ZERO))
+            .unwrap_or(egui::vec2(16.0, 40.0))
+    });
+    let size = fit_size(
+        area.work,
+        ctx.viewport_rect().size(),
+        scale,
+        [chrome.x + 16.0 / scale, chrome.y + 16.0 / scale],
+    );
+    let anchor = anchor.unwrap_or(Anchor {
+        left: area.work[2] - 30,
+        top: area.work[3] + 8,
+        right: area.work[2] - 8,
+        bottom: area.work[3] + 30,
+    });
+    let (x, y) = place_popup(
+        area.work,
+        anchor,
+        ((size.x + chrome.x) * scale).round() as i32,
+        ((size.y + chrome.y) * scale).round() as i32,
+    );
+    let current_scale = ctx.pixels_per_point();
+    (
+        egui::pos2(x as f32 / current_scale, y as f32 / current_scale),
+        size,
+    )
+}
+
+#[cfg(feature = "tray-smoke-test")]
+pub fn preferences_near_tray(anchor: Anchor, position: [i32; 2], size: [u32; 2]) -> bool {
+    let area = monitor_area(Some(anchor));
+    let expected = place_popup(area.work, anchor, size[0] as i32, size[1] as i32);
+    (position[0] - expected.0).abs() <= 2 && (position[1] - expected.1).abs() <= 2
+}
+
 pub fn popup_geometry(
     anchor: Option<Anchor>,
     desired: egui::Vec2,
@@ -539,6 +585,32 @@ impl Tray {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preferences_fit_beside_the_right_hand_tray_at_each_scale() {
+        for work in [[0, 0, 1920, 1040], [-2560, -300, 0, 1100]] {
+            for scale in [1.0, 1.25, 1.5, 2.0] {
+                let chrome = egui::vec2(16.0, 40.0);
+                let size = fit_size(
+                    work,
+                    egui::vec2(620.0, 780.0),
+                    scale,
+                    [chrome.x + 16.0 / scale, chrome.y + 16.0 / scale],
+                );
+                let outer = ((size + chrome) * scale).round();
+                let anchor = Anchor {
+                    left: work[2] - 40,
+                    top: work[3],
+                    right: work[2] - 16,
+                    bottom: work[3] + 24,
+                };
+                let (x, y) = place_popup(work, anchor, outer.x as i32, outer.y as i32);
+                assert!(x >= work[0] + 8 && y >= work[1] + 8);
+                assert_eq!(x + outer.x as i32, work[2] - 8);
+                assert!(y + outer.y as i32 <= work[3] - 8);
+            }
+        }
+    }
 
     #[test]
     fn high_dpi_windows_fit_the_work_area_instead_of_clipping_the_footer() {
