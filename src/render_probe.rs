@@ -1,7 +1,7 @@
 //! Opt-in native renderer regression. Input is synthetic egui input, never OS input.
 use super::*;
 
-type Baseline = (u64, u64, usize);
+type Baseline = (u64, u64, u64, u64, usize);
 
 pub(super) struct Probe {
     mode: String,
@@ -62,6 +62,8 @@ impl Probe {
                             (
                                 v.stats.rasterized,
                                 v.stats.ui_passes,
+                                v.stats.logic_passes,
+                                v.stats.retained_presentations,
                                 v.stats.times_ms.len(),
                             ),
                         )
@@ -71,12 +73,14 @@ impl Probe {
         }
         if elapsed >= Duration::from_secs(8) {
             let views: Vec<_> = host.views.iter().map(|(id,v)| {
-                let (raster,ui,times) = self.baseline.as_ref().unwrap().get(id).copied().unwrap_or_default();
+                let (raster,ui,logic,present,times) = self.baseline.as_ref().unwrap().get(id).copied().unwrap_or_default();
                 let mut ms = v.stats.times_ms[times..].to_vec();
                 ms.sort_by(f64::total_cmp);
                 let n = ms.len();
                 serde_json::json!({"title":v.window.title(), "visible":v.window.is_visible(),
                     "rasterized":v.stats.rasterized-raster, "ui_passes":v.stats.ui_passes-ui,
+                    "logic_passes":v.stats.logic_passes-logic,
+                    "retained_presentations":v.stats.retained_presentations-present,
                     "hidden_paints":v.stats.hidden_paints,
                     "frame_median_ms":ms.get(n/2), "frame_p95_ms":ms.get(n.saturating_sub(1)*95/100),
                     "frame_max_ms":ms.last()})
@@ -89,12 +93,13 @@ impl Probe {
                 .iter()
                 .map(|v| v["hidden_paints"].as_u64().unwrap())
                 .sum();
+            let ui_passes: u64 = views.iter().map(|v| v["ui_passes"].as_u64().unwrap()).sum();
             let visible = views.iter().any(|v| v["visible"] == true);
             let passed = hidden_paints == 0
                 && if self.mode == "slider" {
                     visible && rasterized >= 10
                 } else {
-                    rasterized == 0 && (visible == (self.mode != "hidden"))
+                    rasterized == 0 && ui_passes == 0 && (visible == (self.mode != "hidden"))
                 };
             self.report = Some(serde_json::json!({"mode":self.mode,"passed":passed,
                 "warmup_seconds":3,"sample_seconds":5,"views":views,

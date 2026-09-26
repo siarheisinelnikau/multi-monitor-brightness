@@ -12,7 +12,7 @@ build = "build.rs"
 # Opt-in developer capture; regular builds do not exit or save screenshots.
 ui-capture = ["dep:png"]
 tray-smoke-test = []
-updater-smoke-test = []
+updater-smoke-test = ["rust-auto-updator/smoke-test"]
 render-smoke-test = []
 
 [dependencies]
@@ -24,9 +24,8 @@ winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] 
 bytemuck = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-semver = "1.0.28"
-sha2 = "0.10.9"
-ureq = { version = "=3.5.0", default-features = false, features = ["native-tls-no-default"] }
+rust-auto-updator = { path = "../rust-auto-updator/crates/rust-auto-updator" }
+rust-auto-updator-egui = { path = "../rust-auto-updator/crates/rust-auto-updator-egui" }
 png = { version = "0.18.1", optional = true }
 tray-icon = { version = "=0.21.3", default-features = false }
 windows-sys = { version = "0.61.2", features = [

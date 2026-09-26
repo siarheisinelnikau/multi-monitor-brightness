@@ -26,6 +26,7 @@ pub struct CreationContext {
 
 pub trait App {
     fn logic(&mut self, ctx: &Context);
+    fn logic_delay(&self) -> Duration;
     fn ui(&mut self, ui: &mut egui::Ui);
     fn shutdown(&mut self);
 }
@@ -88,6 +89,7 @@ struct Host {
     textures: egui::TexturesDelta,
     texture_epoch: u64,
     started: Instant,
+    next_logic: Instant,
     error: Option<String>,
     trace: Option<std::path::PathBuf>,
     #[cfg(feature = "render-smoke-test")]
@@ -127,6 +129,7 @@ impl Host {
             egui_winit::create_window(&self.ctx, event_loop, &builder)
                 .map_err(|e| e.to_string())?,
         );
+        set_window_icons(&window)?;
         builder.visible = Some(desired_visible);
         let display = softbuffer::Context::new(event_loop.owned_display_handle())
             .map_err(|e| format!("Could not create the GDI context: {e}"))?;
@@ -307,6 +310,7 @@ impl Host {
         let logic = self
             .ctx
             .run_logic(&raw, |ctx| self.app.as_mut().unwrap().logic(ctx));
+        self.next_logic = Instant::now() + self.app.as_ref().unwrap().logic_delay();
         self.views.get_mut(&id).unwrap().stats.logic_passes += 1;
         let view = self.views.get_mut(&id).unwrap();
         view.input
@@ -462,6 +466,39 @@ impl Host {
         event_loop.exit();
     }
 
+    fn background_logic(&mut self, event_loop: &ActiveEventLoop) -> Result<(), String> {
+        if self.app.is_none() {
+            return Ok(());
+        }
+        for view in self.views.values_mut() {
+            egui_winit::update_viewport_info(&mut view.info, &self.ctx, &view.window, false);
+        }
+        let raw = egui::RawInput {
+            viewport_id: ViewportId::ROOT,
+            viewports: self
+                .views
+                .iter()
+                .map(|(id, view)| (*id, view.info.clone()))
+                .collect(),
+            time: Some(self.started.elapsed().as_secs_f64()),
+            ..Default::default()
+        };
+        // Background schedules and saves do not construct an unchanged window scene.
+        // Input stays queued for the next actual UI frame.
+        let output = self
+            .ctx
+            .run_logic(&raw, |ctx| self.app.as_mut().unwrap().logic(ctx));
+        self.next_logic = Instant::now() + self.app.as_ref().unwrap().logic_delay();
+        let view = self.views.get_mut(&ViewportId::ROOT).unwrap();
+        view.stats.logic_passes += 1;
+        view.input
+            .handle_platform_output(&view.window, output.platform_output);
+        for (id, commands) in output.viewport_commands {
+            self.commands(event_loop, id, commands)?;
+        }
+        Ok(())
+    }
+
     fn write_trace(&mut self) {
         let Some(path) = &self.trace else {
             return;
@@ -503,6 +540,20 @@ fn refresh_interval(window: &Window) -> Duration {
         .filter(|rate| *rate > 0)
         .unwrap_or(60_000);
     Duration::from_nanos(1_000_000_000_000 / u64::from(refresh))
+}
+
+fn set_window_icons(window: &Window) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXICON, SM_CXSMICON};
+    use winit::platform::windows::WindowExtWindows;
+    let icon = |metric| {
+        let size = unsafe { GetSystemMetrics(metric) }.clamp(16, 256) as u32;
+        winit::window::Icon::from_rgba(crate::icon::rgba(size), size, size)
+            .map_err(|error| error.to_string())
+    };
+    window.set_window_icon(Some(icon(SM_CXSMICON)?));
+    // winit's generic window icon assigns ICON_SMALL; the taskbar needs ICON_BIG.
+    window.set_taskbar_icon(Some(icon(SM_CXICON)?));
+    Ok(())
 }
 
 fn same_scene(a: &[egui::ClippedPrimitive], b: &[egui::ClippedPrimitive]) -> bool {
@@ -674,6 +725,15 @@ impl ApplicationHandler<Wake> for Host {
             }
         }
         let now = Instant::now();
+        if now >= self.next_logic {
+            if let Err(error) = self.background_logic(event_loop) {
+                self.fail(event_loop, error);
+                return;
+            }
+            if event_loop.exiting() {
+                return;
+            }
+        }
         let due: Vec<_> = self
             .views
             .iter()
@@ -688,7 +748,12 @@ impl ApplicationHandler<Wake> for Host {
                 return;
             }
         }
-        let next = self.views.values().filter_map(|v| v.next).min();
+        let next = self
+            .views
+            .values()
+            .filter_map(|v| v.next)
+            .chain(Some(self.next_logic))
+            .min();
         #[cfg(feature = "render-smoke-test")]
         let next = next
             .into_iter()
@@ -737,6 +802,7 @@ pub fn run(
         textures: Default::default(),
         texture_epoch: 0,
         started: Instant::now(),
+        next_logic: Instant::now(),
         error: None,
         trace: std::env::var_os("MMB_RENDER_TRACE").map(Into::into),
         #[cfg(feature = "render-smoke-test")]

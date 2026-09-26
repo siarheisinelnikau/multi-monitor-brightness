@@ -101,6 +101,18 @@ Changing brightness manually pauses the schedule for the current evening. Use **
 
 Install Rust (stable, MSVC toolchain) and Visual Studio Build Tools with **Desktop development with C++** and a Windows SDK. Rust 1.95 or newer is required.
 
+This checkout now uses the reusable `rust-auto-updator` workspace as a local path dependency. Place it beside this project:
+
+```text
+github/
+  luma-keys/
+  rust-auto-updator/
+    crates/rust-auto-updator/
+    crates/rust-auto-updator-egui/
+```
+
+The companion workspace must also be present in CI before Cargo runs. It has not been published as a remote dependency yet; checking out only this repository is insufficient. Its README contains configuration and integration examples for other Rust applications.
+
 ```powershell
 cargo run -- --demo
 cargo fmt --check
@@ -111,7 +123,7 @@ cargo test --locked
 
 The build script reads the package version and creates `dist\MultiMonitorBrightness-vVERSION.exe` and `dist\SHA256SUMS.txt`, with the same versioned filename in the checksum. Only one architecture is offered, so the executable has no architecture suffix. `.cargo/config.toml` statically links the MSVC runtime. The icon, manifest, and default fonts are embedded. Only standard Windows and graphics-driver DLLs are needed at runtime.
 
-CI runs formatting, Clippy, tests, and a release build on Windows, then uploads the executable as a build artifact. CI and release builds use the tested Rust 1.96.1 toolchain.
+The CI workflows run formatting, Clippy, tests, and a release build on Windows, then upload the executable as a build artifact. They require provisioning the companion workspace described above. CI and release builds use the tested Rust 1.96.1 toolchain.
 
 Optional read-only hardware check (requires a live desktop): `cargo test read_hardware_brightness -- --ignored --nocapture`.
 
@@ -119,11 +131,15 @@ Optional read-only hardware check (requires a live desktop): `cargo test read_ha
 
 `src/monitors.rs` owns all physical monitor handles on a dedicated worker thread and releases them on refresh or shutdown. Writes are coalesced per monitor, and revision numbers keep delayed results from overwriting newer slider positions. Failed changes leave the last successful manual brightness intact. A separate thread registers and receives Win32 global hotkeys; egui handles the window and tray actions.
 
-`src/host.rs` hosts egui with winit, CPU rasterization, and Windows GDI bitmap presentation. The Windows dependency tree contains no eframe, OpenGL, glutin, or wgpu renderer. Tray commands, hotkeys, monitor responses, saving, and schedules run independently of visible painting. Hidden windows do not rasterize; unchanged visible scenes skip rasterization and presentation. Windows expose events restore the retained bitmap. Pointer and repaint bursts coalesce to the current monitor's refresh period (60 Hz fallback when unavailable). The event loop waits for input or scheduled work rather than polling continuously.
+`src/host.rs` hosts egui with winit, CPU rasterization, and Windows GDI bitmap presentation. The Windows dependency tree contains no eframe, OpenGL, glutin, or wgpu renderer. Tray commands, hotkeys, monitor responses, saving, and schedules run independently of visible painting. The background logic deadline does not build a UI scene: it requests painting only when displayed state changes. Hidden windows do not rasterize; unchanged visible scenes skip rasterization and presentation. Windows expose events restore the retained bitmap. Pointer and repaint bursts coalesce to the current monitor's refresh period (60 Hz fallback when unavailable). The event loop waits for input or scheduled work rather than polling continuously.
+
+The executable embeds native 16, 20, 24, 32, 48, 64, 128 and 256 pixel application icons. The tray sun is separately rasterized at Windows' small-icon metric for a readable silhouette. Run `scripts/inspect-icons.ps1 -Executable <path>` to load packaged icon resources and save PNG proofs without executing the application; this verifies resources rather than OS tray interaction.
 
 Font and image uploads from hidden UI passes remain pending until the next visible paint. The shared CPU renderer retains its textures across the separate brightness and preferences windows. The vendored rasterizer's original license files are in `vendor/egui_software_backend`; binary notices are in `THIRD_PARTY_NOTICES.txt`.
 
 Settings are written to a same-directory temporary file, synced, then replaced. An unreadable settings file is preserved and automatic saving is paused until it is fixed or moved. The evening scheduler derives its output from manual levels rather than progressively modifying its own previous output.
+
+`src/updater.rs` is a product adapter: canonical repository, asset name, host version, restart arguments and compatibility with older portable update plans. The independent `rust-auto-updator` core owns the network worker, state machine, checksum verification and Windows installer. `rust-auto-updator-egui` supplies the update panel; its optional `style` module supplies the shared theme, palette and card container. The application retains preference persistence, pending brightness writes and the decision to exit after a successful update handoff.
 
 ## Status
 
@@ -131,9 +147,9 @@ Current version: 0.2.5. Automated tests cover brightness scaling, schedule bound
 
 Live-window regression checks the brightness popup, separate preferences, reopening and minimizing windows, hidden brightness commands, background dimming/restoration, and Quit. Run `scripts\test-tray.ps1` and `scripts\test-tray.ps1 -Startup` on an interactive Windows desktop. The checks use simulated monitors and the installed menu callback, without injecting mouse/keyboard input or changing physical brightness.
 
-Run `scripts\test-updater.ps1` for a native update regression using an isolated copy in `target`: it waits for a running executable to exit, replaces it, checks the backup, restarts the new copy, and cleans up its own fixture. Both normal process queries and a real Windows access-denied query are covered; replacement still waits for process termination and verifies the installed file hash. CI runs this regression too. The optional network check `cargo test public_release_download_verifies -- --ignored --nocapture` downloads and verifies the latest public release without installing or executing it.
+Run `scripts\test-updater.ps1` for a native update regression using an isolated copy in `target`: it waits for a running executable to exit, replaces it, checks the backup, restarts the new copy, and cleans up its own fixture. Both normal process queries and a real Windows access-denied query are covered; replacement still waits for process termination and verifies the installed file hash. CI runs this regression too. Release selection, verification and startup-check unit tests now live in the companion workspace; run `cargo test --manifest-path ../rust-auto-updator/Cargo.toml --workspace --all-features --locked` to include them.
 
-For a release-mode CPU renderer regression on an interactive Windows desktop, run `scripts\test-renderer.ps1`. It uses three seconds of warm-up and five seconds of measurement for Settings, the brightness popup, hidden startup, and a simulated slider drag. Native pointer input is ignored only in this opt-in benchmark, so desktop activity does not contaminate the idle workload. It verifies zero idle rasterizations, zero hidden paints, changing slider frames, and absence of OpenGL/DirectX modules. JSON results stay in `dist/render-tests`. This is a controlled input test; it does not establish subjective mouse latency on every machine.
+For a release-mode CPU renderer regression on an interactive Windows desktop, run `scripts\test-renderer.ps1`. It uses three seconds of warm-up and five seconds of measurement for Settings, the brightness popup, hidden startup, and a simulated slider drag. Native pointer input is ignored only in this opt-in benchmark, so desktop activity does not contaminate the idle workload. It verifies zero idle UI layout and rasterization, zero hidden paints, changing slider frames, and absence of OpenGL/DirectX modules. Reports separate background logic passes and retained OS-expose presentations. JSON results stay in `dist/render-tests`. This is a controlled input test; it does not establish subjective mouse latency on every machine.
 
 ## Short description
 

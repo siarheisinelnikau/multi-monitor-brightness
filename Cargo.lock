@@ -1619,13 +1619,12 @@ dependencies = [
  "egui-winit",
  "egui_software_backend",
  "png 0.18.1",
- "semver",
+ "rust-auto-updator",
+ "rust-auto-updator-egui",
  "serde",
  "serde_json",
- "sha2",
  "softbuffer",
  "tray-icon",
- "ureq",
  "windows-sys 0.61.2",
  "winit",
  "winresource",
@@ -2405,6 +2404,26 @@ checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
 dependencies = [
  "libredox",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rust-auto-updator"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ureq",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rust-auto-updator-egui"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "rust-auto-updator",
 ]
 
 [[package]]
