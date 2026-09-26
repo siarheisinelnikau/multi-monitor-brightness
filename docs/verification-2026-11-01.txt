@@ -1,0 +1,47 @@
+Multi-Monitor Brightness verification — 2026-11-01
+
+Scope: shared updater extraction, executable/window/taskbar/tray icon integrity,
+and event-driven CPU/GDI rendering. No computer-use tools or OS input injection.
+
+Source changes
+- Reuse the sibling rust-auto-updator core, controller and egui panel/theme.
+- Keep product repository, portable restart arguments and legacy update plans
+  in the local adapter. No real update was downloaded or installed.
+- Embed native application icons at 16/20/24/32/48/64/128/256 pixels and assign
+  both native small-window and large-taskbar icon handles.
+- Keep separate native-size tray artwork. Alpha/visible-bounds tests cover
+  16/20/24/32 pixel tray sizes.
+- Background schedules/saves run through logic-only deadlines. Unchanged
+  background ticks no longer construct the visible UI scene.
+
+Checks
+- cargo test --locked --all-features: 21 passed; 2 hardware/registry tests ignored.
+- cargo clippy --locked --all-targets --all-features -- -D warnings: passed.
+- cargo fmt --package multi-monitor-brightness --check: passed.
+- Optimized instrumented build and final ordinary static-CRT package: passed.
+- Final dist/MultiMonitorBrightness-v0.2.5.exe: 6,121,984 bytes.
+  SHA-256: 73e8041327643decc413d72505594436f58d44c8e388384253507f3c0d6bc794
+- scripts/inspect-icons.ps1 loaded all eight native resource sizes from that
+  final EXE as data, checked alpha/content and saved PNGs without executing it.
+  The 16px and 64px extracted PNGs were visually inspected.
+
+Finite optimized renderer diagnostic
+Each mode used simulated monitors, 3 seconds warm-up and 5 seconds measurement.
+Settings, popup and hidden startup: 0 UI passes, 0 rasterizations, 0 retained
+presentations, 0 hidden paints, 0.00% sampled one-core CPU (timer resolution).
+Background logic continued independently. Synthetic slider changes produced
+126 useful rasterizations during the 5 second sample; sampled CPU was 18.15%
+of one core. The controlled-input benchmark does not measure user-perceived lag.
+The host is egui CPU rasterization -> softbuffer 0.4.8 CreateDIBSection/BitBlt.
+No OpenGL/DirectX modules were observed in the test process. GPU/compositor
+latency was not measured. JSON evidence is generated in dist/render-tests.
+
+Limits
+The isolated tray callback regression passed its first popup check, then its
+test-only assertion failed because Shell_NotifyIconGetRect could not provide
+the tray rectangle in this sandbox. This does not certify real Shell tray
+placement/clicks, taskbar appearance, mixed-DPI behavior, or full tray lifecycle.
+No unrelated process was stopped. All diagnostic instances exited.
+The ordinary package was rebuilt after the shared core source freeze; renderer
+measurements used the optimized instrumented build with the same host/scheduler.
+Building this repository or CI requires the sibling rust-auto-updator workspace.

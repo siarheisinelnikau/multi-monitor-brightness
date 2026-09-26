@@ -16,14 +16,9 @@ use std::{
 #[path = "tray_smoke.rs"]
 mod tray_smoke;
 
-const BG: Color32 = Color32::from_rgb(23, 24, 27);
-const CARD: Color32 = Color32::from_rgb(32, 33, 38);
-const BORDER: Color32 = Color32::from_rgb(51, 53, 60);
-const ACCENT: Color32 = Color32::from_rgb(137, 167, 237);
-const TRACK: Color32 = Color32::from_rgb(66, 68, 77);
-const TEXT: Color32 = Color32::from_rgb(239, 239, 242);
-const MUTED: Color32 = Color32::from_rgb(162, 164, 175);
-const WARM: Color32 = Color32::from_rgb(224, 181, 132);
+use rust_auto_updator_egui::style::{
+    ACCENT, BG, BORDER, CARD, MUTED, TEXT, TRACK, WARM, apply_dark_theme as theme, card,
+};
 
 struct Display {
     info: MonitorInfo,
@@ -42,23 +37,6 @@ enum Tab {
     Settings,
 }
 
-enum UpdateState {
-    Idle,
-    Checking,
-    Current,
-    Available(Box<updater::Release>),
-    Downloading { received: u64, total: u64 },
-    Installing,
-    Error(String),
-}
-impl UpdateState {
-    fn busy(&self) -> bool {
-        matches!(
-            self,
-            Self::Checking | Self::Downloading { .. } | Self::Installing
-        )
-    }
-}
 fn popup_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("brightness-popup")
 }
@@ -80,10 +58,8 @@ pub struct MultiMonitorBrightness {
     popup_focus_pending: bool,
     popup_anchor: Option<platform::Anchor>,
     popup_details: bool,
-    updates: Option<updater::Service>,
-    update_state: UpdateState,
+    updates: updater::Controller,
     prepared_update: Option<updater::Prepared>,
-    started: Instant,
     monitors: Option<monitors::Controller>,
     hotkeys: Option<platform::HotkeyService>,
     tray: Option<platform::Tray>,
@@ -185,14 +161,14 @@ impl MultiMonitorBrightness {
         let popup_open = !start_in_tray && !open_settings && tray.is_some();
         let popup_anchor = tray.as_ref().and_then(|tray| tray.anchor());
         let updates = if demo {
-            None
+            updater::Controller::disabled(
+                crate::VERSION,
+                "Update checks are disabled in preview mode.",
+            )
         } else {
-            match updater::Service::new(cc.egui_ctx.clone(), portable) {
-                Ok(service) => Some(service),
-                Err(error) => {
-                    notice = Some(error);
-                    None
-                }
+            match updater::start(cc.egui_ctx.clone(), portable) {
+                Ok(service) => service,
+                Err(error) => updater::Controller::disabled(crate::VERSION, &error),
             }
         };
         if updated {
@@ -222,9 +198,7 @@ impl MultiMonitorBrightness {
             popup_anchor,
             popup_details: false,
             updates,
-            update_state: UpdateState::Idle,
             prepared_update: None,
-            started: Instant::now(),
             monitors,
             hotkeys,
             tray,
@@ -391,6 +365,9 @@ impl MultiMonitorBrightness {
             .as_ref()
             .map(|m| m.events.try_iter().collect())
             .unwrap_or_default();
+        if !events.is_empty() {
+            ctx.request_repaint();
+        }
         for event in events {
             self.monitor_event(event);
         }
@@ -399,6 +376,9 @@ impl MultiMonitorBrightness {
             .as_ref()
             .map(|h| h.events.try_iter().collect())
             .unwrap_or_default();
+        if !events.is_empty() {
+            ctx.request_repaint();
+        }
         for event in events {
             match event {
                 HotkeyEvent::Action(action) => self.action(action, ctx),
@@ -413,6 +393,9 @@ impl MultiMonitorBrightness {
             .as_ref()
             .map(|t| t.events.try_iter().collect())
             .unwrap_or_default();
+        if !actions.is_empty() {
+            ctx.request_repaint();
+        }
         for action in actions {
             self.action(action, ctx);
         }
@@ -555,15 +538,8 @@ impl MultiMonitorBrightness {
     }
 
     fn check_updates(&mut self) {
-        if self.update_state.busy() || self.demo {
-            return;
-        }
-        if let Some(service) = &self.updates {
-            service.check();
-            self.update_state = UpdateState::Checking;
-        } else {
-            self.update_state =
-                UpdateState::Error("Update service is unavailable. Restart the app.".into());
+        if !self.demo && self.quitting.is_none() {
+            self.updates.check();
         }
     }
 
@@ -895,7 +871,7 @@ impl MultiMonitorBrightness {
                     {
                         self.open_preferences(Tab::Evening, &ctx);
                     }
-                    if matches!(self.update_state, UpdateState::Available(_))
+                    if self.updates.update_available()
                         && ui.small_button("Update available").clicked()
                     {
                         self.open_preferences(Tab::Settings, &ctx);
@@ -1180,49 +1156,23 @@ impl MultiMonitorBrightness {
 
 impl MultiMonitorBrightness {
     fn tick(&mut self, ctx: &egui::Context) {
+        let before = self.background_visual_state();
         self.receive(ctx);
-        let updates: Vec<_> = self
-            .updates
-            .as_ref()
-            .map(|s| s.events.try_iter().collect())
-            .unwrap_or_default();
-        for event in updates {
-            match event {
-                updater::Event::Checked(result) => {
-                    self.settings.last_update_check = updater::now();
-                    self.dirty();
-                    self.update_state = match result {
-                        Ok(Some(release)) => UpdateState::Available(release),
-                        Ok(None) => UpdateState::Current,
-                        Err(e) => UpdateState::Error(e),
-                    };
-                }
-                updater::Event::Progress { received, total } => {
-                    self.update_state = UpdateState::Downloading { received, total }
-                }
-                updater::Event::Ready(result) => {
-                    if self.quitting.is_some() {
-                        continue;
-                    }
-                    match result {
-                        Ok(prepared) => {
-                            self.prepared_update = Some(prepared);
-                            self.update_state = UpdateState::Installing;
-                            self.quitting = Some(Instant::now());
-                            self.popup_open = false;
-                        }
-                        Err(error) => self.update_state = UpdateState::Error(error),
-                    }
-                }
-            }
+        let update = self.updates.poll(
+            !self.demo && self.quitting.is_none() && self.settings.check_updates_automatically,
+        );
+        if update.checked {
+            self.settings.last_update_check = updater::now();
+            self.dirty();
+            ctx.request_repaint();
         }
-        if !self.demo
-            && self.quitting.is_none()
-            && self.settings.check_updates_automatically
-            && self.started.elapsed() > Duration::from_secs(5)
-            && matches!(self.update_state, UpdateState::Idle)
-        {
-            self.check_updates();
+        if update.ready_to_install {
+            let prepared = self.updates.take_prepared();
+            if self.quitting.is_none() {
+                self.prepared_update = prepared;
+                self.quitting = Some(Instant::now());
+                self.popup_open = false;
+            }
         }
         #[cfg(feature = "tray-smoke-test")]
         if let Some(mut smoke) = self.smoke.take() {
@@ -1250,131 +1200,53 @@ impl MultiMonitorBrightness {
             if let Some(mut prepared) = self.prepared_update.take()
                 && let Err(error) = updater::handoff(&mut prepared)
             {
-                self.update_state = UpdateState::Error(error);
+                self.updates.installation_failed(error);
                 self.quitting = None;
+                ctx.request_repaint();
                 return;
             }
             ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
         }
-        // A quiet 1 Hz timer keeps schedules running while hidden; active drags get faster feedback.
-        let pending = self
-            .displays
-            .iter()
-            .any(|d| d.queued.is_some() || d.writing);
-        ctx.request_repaint_after_for(
-            if pending || self.quitting.is_some() {
-                Duration::from_millis(60)
-            } else {
-                Duration::from_secs(1)
-            },
-            egui::ViewportId::ROOT,
-        );
+        if before != self.background_visual_state() {
+            ctx.request_repaint();
+        }
     }
+
+    fn background_visual_state(&self) -> BackgroundVisualState {
+        BackgroundVisualState {
+            revision: self.revision,
+            schedule_active: self.schedule_was_active,
+            paused_cycle: self.paused_cycle,
+            notice: self.notice.clone(),
+            displays: self
+                .displays
+                .iter()
+                .map(|d| (d.value, d.confirmed, d.writing, d.error.clone()))
+                .collect(),
+        }
+    }
+}
+
+#[derive(PartialEq)]
+struct BackgroundVisualState {
+    revision: u64,
+    schedule_active: bool,
+    paused_cycle: Option<i64>,
+    notice: Option<String>,
+    displays: Vec<(u8, u8, bool, Option<String>)>,
 }
 
 impl MultiMonitorBrightness {
     fn updates_ui(&mut self, ui: &mut egui::Ui) {
-        card(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Updates").size(17.0).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(
-                            !self.demo && !self.update_state.busy(),
-                            egui::Button::new("Check for updates"),
-                        )
-                        .clicked()
-                    {
-                        self.check_updates();
-                    }
-                });
-            });
-            ui.add_space(8.0);
-            match &self.update_state {
-                UpdateState::Idle => {
-                    ui.label(
-                        RichText::new(if self.demo {
-                            "Update checks are disabled in preview mode."
-                        } else {
-                            "Updates are downloaded from the official GitHub releases."
-                        })
-                        .size(12.0)
-                        .color(MUTED),
-                    );
-                }
-                UpdateState::Checking => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Checking GitHub…");
-                    });
-                }
-                UpdateState::Current => {
-                    ui.label(RichText::new("You're up to date.").size(13.0).color(MUTED));
-                }
-                UpdateState::Available(release) => {
-                    let release = release.clone();
-                    ui.label(format!("Version {} is available", release.version));
-                    ui.horizontal(|ui| {
-                        if ui.button("Download and install").clicked()
-                            && let Some(service) = &self.updates
-                        {
-                            service.download(release.clone());
-                            self.update_state = UpdateState::Downloading {
-                                received: 0,
-                                total: 0,
-                            };
-                        }
-                        ui.hyperlink_to("Release notes on GitHub", &release.page);
-                    });
-                    ui.label(
-                        RichText::new("The app will restart. Your settings will be kept.")
-                            .size(11.0)
-                            .color(MUTED),
-                    );
-                    if !release.notes.is_empty() {
-                        ui.collapsing("What's new", |ui| {
-                            ui.label(&release.notes);
-                        });
-                    }
-                }
-                UpdateState::Downloading { received, total } => {
-                    let progress = if *total > 0 {
-                        *received as f32 / *total as f32
-                    } else {
-                        0.0
-                    };
-                    ui.add(
-                        egui::ProgressBar::new(progress)
-                            .show_percentage()
-                            .animate(true),
-                    );
-                    ui.label(
-                        RichText::new("Downloading and verifying SHA-256…")
-                            .size(12.0)
-                            .color(MUTED),
-                    );
-                }
-                UpdateState::Installing => {
-                    ui.label("Restarting to finish the update…");
-                }
-                UpdateState::Error(error) => {
-                    ui.label(RichText::new(error).size(12.0).color(WARM));
-                }
-            }
-            ui.add_space(8.0);
-            if ui
-                .add_enabled(
-                    !self.demo,
-                    egui::Checkbox::new(
-                        &mut self.settings.check_updates_automatically,
-                        "Check for updates on startup",
-                    ),
-                )
-                .changed()
-            {
-                self.dirty();
-            }
-        });
+        if rust_auto_updator_egui::show(
+            ui,
+            &mut self.updates,
+            &mut self.settings.check_updates_automatically,
+        )
+        .preference_changed
+        {
+            self.dirty();
+        }
     }
 
     #[cfg(feature = "ui-capture")]
@@ -1411,6 +1283,15 @@ impl Application {
 impl crate::host::App for Application {
     fn logic(&mut self, ctx: &egui::Context) {
         self.0.borrow_mut().tick(ctx);
+    }
+
+    fn logic_delay(&self) -> Duration {
+        let app = self.0.borrow();
+        if app.quitting.is_some() || app.displays.iter().any(|d| d.queued.is_some() || d.writing) {
+            Duration::from_millis(60)
+        } else {
+            Duration::from_secs(1)
+        }
     }
 
     fn ui(&mut self, root: &mut egui::Ui) {
@@ -1574,80 +1455,6 @@ impl MultiMonitorBrightness {
             self.save();
         }
     }
-}
-
-fn theme(ctx: &egui::Context) {
-    // Use the installed Windows UI font without bundling a proprietary font file.
-    if let Some(windows) = std::env::var_os("WINDIR")
-        && let Ok(bytes) = std::fs::read(PathBuf::from(windows).join("Fonts").join("segoeui.ttf"))
-    {
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert(
-            "windows-ui".into(),
-            egui::FontData::from_owned(bytes).into(),
-        );
-        fonts
-            .families
-            .entry(egui::FontFamily::Proportional)
-            .or_default()
-            .insert(0, "windows-ui".into());
-        ctx.set_fonts(fonts);
-    }
-    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
-    style.visuals = egui::Visuals::dark();
-    style.visuals.override_text_color = Some(TEXT);
-    style.visuals.panel_fill = BG;
-    style.visuals.window_fill = CARD;
-    style.visuals.extreme_bg_color = BG;
-    style.visuals.faint_bg_color = CARD;
-    style.visuals.hyperlink_color = ACCENT;
-    style.visuals.selection.bg_fill = Color32::from_rgb(51, 66, 96);
-    style.visuals.selection.stroke = Stroke::new(1.0, ACCENT);
-    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT);
-    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
-    style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(43, 44, 51);
-    style.visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(43, 44, 51);
-    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
-    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, MUTED);
-    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(53, 55, 64);
-    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(53, 55, 64);
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(81, 86, 103));
-    style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT);
-    style.visuals.widgets.active.bg_fill = Color32::from_rgb(58, 66, 88);
-    style.visuals.widgets.active.fg_stroke = Stroke::new(1.2, TEXT);
-    for widgets in [
-        &mut style.visuals.widgets.inactive,
-        &mut style.visuals.widgets.hovered,
-        &mut style.visuals.widgets.active,
-    ] {
-        widgets.corner_radius = 5.into();
-    }
-    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-    style.spacing.button_padding = Vec2::new(10.0, 5.0);
-    style.spacing.interact_size.y = 25.0;
-    style.spacing.icon_width = 15.0;
-    style.spacing.scroll = egui::style::ScrollStyle::solid();
-    style.spacing.scroll.bar_width = 6.0;
-    style
-        .text_styles
-        .insert(egui::TextStyle::Body, FontId::proportional(13.0));
-    style
-        .text_styles
-        .insert(egui::TextStyle::Button, FontId::proportional(12.0));
-    ctx.set_theme(egui::Theme::Dark);
-    ctx.set_style_of(egui::Theme::Dark, style);
-}
-
-fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::new()
-        .fill(CARD)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(9)
-        .inner_margin(16)
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            contents(ui);
-        });
 }
 
 fn sun(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32) {
@@ -1838,10 +1645,8 @@ mod tests {
             popup_focus_pending: false,
             popup_anchor: None,
             popup_details: false,
-            updates: None,
-            update_state: UpdateState::Idle,
+            updates: updater::Controller::disabled(crate::VERSION, "Preview mode"),
             prepared_update: None,
-            started: Instant::now(),
             monitors: None,
             hotkeys: None,
             tray: None,
@@ -1880,36 +1685,6 @@ mod tests {
             },
         ]);
         app
-    }
-
-    #[test]
-    fn startup_update_requests_respect_opt_out_and_manual_checks_remain_available() {
-        let mut app = app();
-        app.demo = false;
-        app.started = Instant::now() - Duration::from_secs(6);
-        app.settings.check_updates_automatically = false;
-        let (service, requests) = updater::Service::test_channel();
-        app.updates = Some(service);
-        let ctx = egui::Context::default();
-        app.tick(&ctx);
-        assert_eq!(
-            requests(),
-            0,
-            "disabled startup checks must make no request"
-        );
-        app.check_updates();
-        assert_eq!(requests(), 1, "manual checks remain available");
-        app.update_state = UpdateState::Idle;
-        app.settings.check_updates_automatically = true;
-        app.settings.last_update_check = updater::now();
-        app.tick(&ctx);
-        assert_eq!(
-            requests(),
-            1,
-            "each launch checks even after a recent result"
-        );
-        app.tick(&ctx);
-        assert_eq!(requests(), 0, "pending checks must not be duplicated");
     }
 
     #[test]
