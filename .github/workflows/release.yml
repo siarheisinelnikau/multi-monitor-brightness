@@ -77,7 +77,8 @@ jobs:
             for (const [path, name] of [
               [`dist/${executable}`, executable],
               ['dist/SHA256SUMS.txt', 'SHA256SUMS.txt'],
-              ['LICENSE', 'LICENSE']
+              ['LICENSE', 'LICENSE'],
+              ['THIRD_PARTY_NOTICES.txt', 'THIRD_PARTY_NOTICES.txt']
             ]) {
               const data = fs.readFileSync(path);
               const digest = 'sha256:' + crypto.createHash('sha256').update(data).digest('hex');

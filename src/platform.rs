@@ -104,11 +104,12 @@ pub fn cursor_in(anchor: Anchor) -> bool {
     }
 }
 
-pub fn popup_position(
-    anchor: Option<Anchor>,
-    size: eframe::egui::Vec2,
-    ctx: &eframe::egui::Context,
-) -> eframe::egui::Pos2 {
+struct MonitorArea {
+    work: [i32; 4],
+    scale: f32,
+}
+
+fn monitor_area(anchor: Option<Anchor>) -> MonitorArea {
     use windows_sys::Win32::{Foundation::POINT, Graphics::Gdi::*, UI::HiDpi::*};
     let mut point = POINT::default();
     unsafe {
@@ -127,27 +128,92 @@ pub fn popup_position(
     };
     let mut dpi_x = 96;
     let mut dpi_y = 96;
-    // SAFETY: The monitor comes from Windows and output structs have their documented layouts.
-    unsafe {
-        GetMonitorInfoW(monitor, &mut info);
+    // SAFETY: Windows supplies the monitor; the output structs have the documented layout.
+    let available = unsafe {
         GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+        GetMonitorInfoW(monitor, &mut info) != 0
+    };
+    let work = if available {
+        [
+            info.rcWork.left,
+            info.rcWork.top,
+            info.rcWork.right,
+            info.rcWork.bottom,
+        ]
+    } else {
+        [
+            0,
+            0,
+            unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(320),
+            unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(240),
+        ]
+    };
+    MonitorArea {
+        work,
+        scale: dpi_x.max(96) as f32 / 96.0,
     }
-    let work = info.rcWork;
-    let scale = dpi_x.max(96) as f32 / 96.0;
+}
+
+fn fit_size(
+    work: [i32; 4],
+    desired: egui::Vec2,
+    pixels_per_point: f32,
+    reserved: [f32; 2],
+) -> egui::Vec2 {
+    let available = egui::vec2(
+        ((work[2] - work[0]) as f32 / pixels_per_point - reserved[0]).max(1.0),
+        ((work[3] - work[1]) as f32 / pixels_per_point - reserved[1]).max(1.0),
+    );
+    desired.min(available).floor()
+}
+
+/// Leave room for the native title bar and taskbar, including on a 200% 1080p display.
+pub fn preferences_size(zoom: f32) -> egui::Vec2 {
+    let primary = monitor_area(Some(Anchor {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    }));
+    fit_size(
+        primary.work,
+        egui::vec2(620.0, 780.0),
+        primary.scale * zoom,
+        [32.0, 64.0],
+    )
+}
+
+pub fn popup_geometry(
+    anchor: Option<Anchor>,
+    desired: egui::Vec2,
+    ctx: &egui::Context,
+) -> (egui::Pos2, egui::Vec2) {
+    let area = monitor_area(anchor);
+    let target_scale = area.scale * ctx.zoom_factor();
+    let size = fit_size(
+        area.work,
+        desired,
+        target_scale,
+        [16.0 / target_scale, 16.0 / target_scale],
+    );
     let anchor = anchor.unwrap_or(Anchor {
-        left: work.right - 30,
-        top: work.bottom + 8,
-        right: work.right - 8,
-        bottom: work.bottom + 30,
+        left: area.work[2] - 30,
+        top: area.work[3] + 8,
+        right: area.work[2] - 8,
+        bottom: area.work[3] + 30,
     });
     let (x, y) = place_popup(
-        [work.left, work.top, work.right, work.bottom],
+        area.work,
         anchor,
-        (size.x * scale) as i32,
-        (size.y * scale) as i32,
+        (size.x * target_scale).round() as i32,
+        (size.y * target_scale).round() as i32,
     );
-    let current_scale = ctx.native_pixels_per_point().unwrap_or(scale);
-    eframe::egui::pos2(x as f32 / current_scale, y as f32 / current_scale)
+    // Commands are expressed in the calling viewport's points, including egui zoom.
+    let current_scale = ctx.pixels_per_point();
+    (
+        egui::pos2(x as f32 / current_scale, y as f32 / current_scale),
+        size,
+    )
 }
 
 fn place_popup(work: [i32; 4], anchor: Anchor, width: i32, height: i32) -> (i32, i32) {
@@ -210,7 +276,7 @@ pub struct HotkeyService {
 }
 
 impl HotkeyService {
-    pub fn new(ctx: eframe::egui::Context) -> Result<Self, String> {
+    pub fn new(ctx: egui::Context) -> Result<Self, String> {
         let (commands, receiver) = mpsc::channel();
         let (sender, events) = mpsc::channel();
         thread::Builder::new()
@@ -335,7 +401,7 @@ pub struct Tray {
 }
 
 impl Tray {
-    pub fn new(ctx: eframe::egui::Context) -> Result<Self, String> {
+    pub fn new(ctx: egui::Context) -> Result<Self, String> {
         use tray_icon::{
             Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
             menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
@@ -470,6 +536,33 @@ impl Tray {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn high_dpi_windows_fit_the_work_area_instead_of_clipping_the_footer() {
+        let work = [0, 0, 1920, 1040];
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let preferences = fit_size(work, egui::vec2(620.0, 780.0), scale, [32.0, 64.0]);
+            assert!((preferences.y + 64.0) * scale <= 1040.0);
+            assert!((preferences.x + 32.0) * scale <= 1920.0);
+            let popup = fit_size(
+                work,
+                egui::vec2(360.0, 640.0),
+                scale,
+                [16.0 / scale, 16.0 / scale],
+            );
+            let anchor = Anchor {
+                left: 1850,
+                top: 1040,
+                right: 1875,
+                bottom: 1065,
+            };
+            let width = (popup.x * scale).round() as i32;
+            let height = (popup.y * scale).round() as i32;
+            let (x, y) = place_popup(work, anchor, width, height);
+            assert!(x >= 8 && y >= 8);
+            assert!(x + width <= 1912 && y + height <= 1032);
+        }
+    }
 
     #[test]
     fn popup_stays_in_work_area_for_each_taskbar_edge_and_negative_monitors() {

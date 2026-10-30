@@ -33,10 +33,10 @@ pub struct SmokeTest {
 }
 
 impl SmokeTest {
-    pub fn new(cc: &eframe::CreationContext<'_>, demo: bool) -> Option<Self> {
+    pub fn new(cc: &crate::host::CreationContext, demo: bool) -> Option<Self> {
         let report = std::env::var_os("MMB_TRAY_SMOKE_REPORT")?;
         assert!(demo, "Tray regression must be launched with --demo");
-        let window = cc.winit_window().expect("native window").clone();
+        let window = cc.window.clone();
         Some(Self {
             observe: Box::new(move || {
                 (
