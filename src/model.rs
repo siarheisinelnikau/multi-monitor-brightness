@@ -10,6 +10,8 @@ pub struct Settings {
     pub monitors: BTreeMap<String, MonitorMemory>,
     pub schedule: Schedule,
     pub hotkeys: Hotkeys,
+    pub check_updates_automatically: bool,
+    pub last_update_check: u64,
 }
 
 impl Default for Settings {
@@ -21,6 +23,8 @@ impl Default for Settings {
             monitors: BTreeMap::new(),
             schedule: Schedule::default(),
             hotkeys: Hotkeys::default(),
+            check_updates_automatically: true,
+            last_update_check: 0,
         }
     }
 }
