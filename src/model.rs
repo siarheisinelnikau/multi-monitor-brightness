@@ -235,6 +235,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn startup_update_opt_out_survives_saved_settings_and_older_preferences() {
+        let old: Settings = serde_json::from_str(r#"{"step":10}"#).unwrap();
+        assert!(old.check_updates_automatically);
+        let disabled: Settings = serde_json::from_str(
+            r#"{"check_updates_automatically":false,"last_update_check":123}"#,
+        )
+        .unwrap();
+        let loaded: Settings =
+            serde_json::from_str(&serde_json::to_string(&disabled).unwrap()).unwrap();
+        assert!(!loaded.check_updates_automatically);
+        assert_eq!(loaded.last_update_check, 123);
+    }
+
+    #[test]
     fn brightness_uses_the_hardware_range() {
         assert_eq!(percent(60, 20, 220), Some(20));
         assert_eq!(raw_value(20, 20, 220), 60);
