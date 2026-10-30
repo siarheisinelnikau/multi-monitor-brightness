@@ -55,7 +55,9 @@ pub fn ico() -> Vec<u8> {
     }
     let pixels = rgba(size);
     for row in (0..size as usize).rev() {
-        for pixel in pixels[row * size as usize * 4..(row + 1) * size as usize * 4].chunks_exact(4)
+        for pixel in pixels[row * size as usize * 4..(row + 1) * size as usize * 4]
+            .as_chunks::<4>()
+            .0
         {
             out.extend([pixel[2], pixel[1], pixel[0], pixel[3]]);
         }

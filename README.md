@@ -76,7 +76,7 @@ cargo test --locked
 
 The build script creates `dist\MultiMonitorBrightness.exe` and its SHA-256 checksum. `.cargo/config.toml` statically links the MSVC runtime. The icon, manifest, and default fonts are embedded. Only standard Windows and graphics-driver DLLs are needed at runtime.
 
-CI runs formatting, Clippy, tests, and a release build on Windows, then uploads the executable as a build artifact.
+CI runs formatting, Clippy, tests, and a release build on Windows, then uploads the executable as a build artifact. CI and release builds use the tested Rust 1.96.1 toolchain.
 
 Optional read-only hardware check (requires a live desktop): `cargo test read_hardware_brightness -- --ignored --nocapture`.
 
