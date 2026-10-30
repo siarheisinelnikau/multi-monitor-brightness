@@ -46,7 +46,7 @@ pub struct Controller {
 }
 
 impl Controller {
-    pub fn new(ctx: eframe::egui::Context, demo: bool) -> Result<Self, String> {
+    pub fn new(ctx: egui::Context, demo: bool) -> Result<Self, String> {
         let (commands, receiver) = mpsc::channel();
         let (sender, events) = mpsc::channel();
         thread::Builder::new()
@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn worker_coalesces_commands_and_returns_latest_revision() {
-        let c = Controller::new(eframe::egui::Context::default(), true).unwrap();
+        let c = Controller::new(egui::Context::default(), true).unwrap();
         assert!(matches!(
             c.events.recv_timeout(Duration::from_secs(3)).unwrap(),
             Event::Scanned(Ok(_))
