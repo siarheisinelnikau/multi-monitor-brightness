@@ -1,6 +1,6 @@
 [package]
 name = "multi-monitor-brightness"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Keyboard-first brightness control for external monitors"
@@ -12,18 +12,22 @@ build = "build.rs"
 # Opt-in developer capture; regular builds do not exit or save screenshots.
 ui-capture = ["dep:png"]
 tray-smoke-test = []
+updater-smoke-test = []
 
 [dependencies]
 eframe = { version = "=0.37.0", default-features = false, features = ["default_fonts", "glow"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1.0.28"
+sha2 = "0.10.9"
+ureq = { version = "=3.5.0", default-features = false, features = ["native-tls-no-default"] }
 png = { version = "0.18.1", optional = true }
 tray-icon = { version = "=0.21.3", default-features = false }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Devices_Display", "Win32_Foundation", "Win32_Graphics_Gdi",
     "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console",
     "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_Time", "Win32_System_Registry",
-    "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi",
 ] }
 
 [build-dependencies]

@@ -5,11 +5,15 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Stage {
     Ready,
-    StartupOpened,
+    PopupOpened,
+    ToggleClosed,
+    ToggleOpened,
+    Reopened,
+    Settings,
+    Schedule,
     Hidden,
     Up,
     Down,
-    Open,
     Minimized,
     Restored,
     HiddenAgain,
@@ -57,7 +61,8 @@ impl SmokeTest {
             );
             std::process::exit(1);
         }
-        let (visible, minimized) = (self.observe)();
+        let (preferences, minimized) = (self.observe)();
+        let (visible, _) = platform::popup_window_state();
         let settled = !app.displays.iter().any(|d| d.queued.is_some() || d.writing);
         let matches = |delta| {
             self.baseline.iter().all(|(id, value)| {
@@ -76,26 +81,10 @@ impl SmokeTest {
             Stage::Ready
                 if !app.scanning && self.started.elapsed() > Duration::from_millis(600) =>
             {
-                if self.started_hidden {
-                    assert!(!visible, "--startup must start without showing a window");
-                    self.pass("startup_stays_in_tray");
-                    dispatch(Action::Show);
-                    self.stage = Stage::StartupOpened;
-                    return;
-                }
-                assert!(visible);
-                self.baseline = app
-                    .displays
-                    .iter()
-                    .filter(|d| d.info.brightness.is_some())
-                    .map(|d| (d.info.id.clone(), d.value))
-                    .collect();
-                assert_eq!(self.baseline.len(), 2, "two simulated supported displays");
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                self.stage = Stage::Hidden;
-            }
-            Stage::StartupOpened if visible && !minimized => {
-                self.pass("open_after_startup_in_tray");
+                assert!(
+                    !preferences,
+                    "Preferences must not open for a brightness tray click"
+                );
                 self.baseline = app
                     .displays
                     .iter()
@@ -103,10 +92,29 @@ impl SmokeTest {
                     .map(|d| (d.info.id.clone(), d.value))
                     .collect();
                 assert_eq!(self.baseline.len(), 2);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                if self.started_hidden {
+                    assert!(!visible);
+                    self.pass("startup_stays_in_tray");
+                    dispatch(Action::Show);
+                }
+                self.stage = Stage::PopupOpened;
+            }
+            Stage::PopupOpened if visible && !preferences => {
+                self.pass("tray_opens_brightness_popup_only");
+                app.tray.as_ref().unwrap().dispatch_click_for_test();
+                self.stage = Stage::ToggleClosed;
+            }
+            Stage::ToggleClosed if !visible && !preferences => {
+                self.pass("left_click_closes_popup");
+                app.tray.as_ref().unwrap().dispatch_click_for_test();
+                self.stage = Stage::ToggleOpened;
+            }
+            Stage::ToggleOpened if visible && !preferences => {
+                self.pass("left_click_opens_popup");
+                app.hide_popup(ctx);
                 self.stage = Stage::Hidden;
             }
-            Stage::Hidden if !visible => {
+            Stage::Hidden if !visible && !preferences => {
                 self.pass("close_to_tray");
                 dispatch(Action::Up);
                 self.stage = Stage::Up;
@@ -121,24 +129,38 @@ impl SmokeTest {
                 assert!(!visible);
                 self.pass("brightness_down_while_hidden");
                 dispatch(Action::Show);
-                self.stage = Stage::Open;
+                self.stage = Stage::Reopened;
             }
-            Stage::Open if visible && !minimized => {
-                self.pass("open_from_tray");
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            Stage::Reopened if visible && !preferences => {
+                self.pass("popup_reopens_from_tray");
+                dispatch(Action::Settings);
+                self.stage = Stage::Settings;
+            }
+            Stage::Settings if preferences && !visible => {
+                assert!(app.tab == Tab::Settings);
+                self.pass("settings_in_separate_window");
+                dispatch(Action::Schedule);
+                self.stage = Stage::Schedule;
+            }
+            Stage::Schedule if preferences && app.tab == Tab::Evening => {
+                self.pass("schedule_in_preferences_window");
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::Minimized(true),
+                );
                 self.stage = Stage::Minimized;
             }
             Stage::Minimized if minimized => {
-                self.pass("minimize");
-                dispatch(Action::Show);
+                self.pass("minimize_preferences");
+                dispatch(Action::Settings);
                 self.stage = Stage::Restored;
             }
-            Stage::Restored if visible && !minimized => {
-                self.pass("open_restores_minimized_window");
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            Stage::Restored if preferences && !minimized => {
+                self.pass("restore_preferences_from_tray");
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
                 self.stage = Stage::HiddenAgain;
             }
-            Stage::HiddenAgain if !visible => {
+            Stage::HiddenAgain if !visible && !preferences => {
                 self.pass("close_to_tray_again");
                 let (_, minute) = platform::local_clock();
                 app.settings.schedule = model::Schedule {
