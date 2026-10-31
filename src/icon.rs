@@ -1,4 +1,4 @@
-// A neutral slate tile with a soft blue sun, shared by the executable and tray.
+// A neutral slate tile with a soft blue sun for the executable and window.
 pub fn rgba(size: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((size * size * 4) as usize);
     for y in 0..size {
@@ -24,6 +24,42 @@ pub fn rgba(size: u32) -> Vec<u8> {
                 color[1],
                 color[2],
                 if corner <= 0.19 { 255 } else { 0 },
+            ]);
+        }
+    }
+    pixels
+}
+
+/// A full-size sun with heavier rays, drawn directly at the Windows tray size.
+#[allow(dead_code)] // This module is also compiled by build.rs for the executable icon.
+pub fn tray_rgba(size: u32) -> Vec<u8> {
+    const SAMPLES: u32 = 4;
+    const BLUE: [u8; 3] = [104, 155, 240];
+    let rays: Vec<_> = (0..8)
+        .map(|i| (i as f32 * std::f32::consts::FRAC_PI_4).sin_cos())
+        .collect();
+    let mut pixels = Vec::with_capacity((size * size * 4) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let mut covered = 0;
+            for sy in 0..SAMPLES {
+                for sx in 0..SAMPLES {
+                    let dx = (x as f32 + (sx as f32 + 0.5) / SAMPLES as f32) / size as f32 - 0.5;
+                    let dy = (y as f32 + (sy as f32 + 0.5) / SAMPLES as f32) / size as f32 - 0.5;
+                    let sun = dx.hypot(dy) <= 0.22
+                        || rays.iter().any(|&(sin, cos)| {
+                            let along = dx * cos + dy * sin;
+                            let across = -dx * sin + dy * cos;
+                            (along - along.clamp(0.335, 0.43)).hypot(across) <= 0.055
+                        });
+                    covered += u32::from(sun);
+                }
+            }
+            pixels.extend_from_slice(&[
+                BLUE[0],
+                BLUE[1],
+                BLUE[2],
+                ((covered * 255 + SAMPLES * SAMPLES / 2) / (SAMPLES * SAMPLES)) as u8,
             ]);
         }
     }
