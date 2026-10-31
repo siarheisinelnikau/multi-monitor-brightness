@@ -6,7 +6,7 @@ An unobtrusive Windows utility for controlling external monitor brightness from 
 
 ## Download
 
-Download [**MultiMonitorBrightness-v0.2.3.exe**](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/download/v0.2.3/MultiMonitorBrightness-v0.2.3.exe) from the [latest release](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/latest). Windows 10/11 x64; no installer or additional runtime required. Save it in a writable folder and run it.
+Download [**MultiMonitorBrightness-v0.2.4.exe**](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/download/v0.2.4/MultiMonitorBrightness-v0.2.4.exe) from the [latest release](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/latest). Windows 10/11 x64; no installer or additional runtime required. Save it in a writable folder and run it.
 
 **Upgrading from 0.2.0:** download the latest release manually, quit the old app from the tray, and replace your previous executable. Version 0.2.0 expects the old download name and cannot install releases that use versioned filenames. Normal AppData settings are kept. For portable mode, keep the existing `multi-monitor-brightness.json` beside the executable and launch with `--portable`. If you change the installed filename, update **Settings → Application → Use this executable** when Windows startup is enabled. From 0.2.1 onward, in-app updates support the versioned release names and preserve the installed filename and startup path.
 
@@ -45,7 +45,7 @@ Actual application screenshots captured in preview mode with simulated monitors.
 
 An ordinary launch controls your real monitors. **Preview** appears only when explicitly launched with `--demo`, which uses simulated displays. Exit the preview and run the executable without arguments to use real hardware.
 
-Launch `MultiMonitorBrightness-v0.2.3.exe`. Enable **DDC/CI** in your external monitor's on-screen menu if the display reports that brightness control is unavailable.
+Launch `MultiMonitorBrightness-v0.2.4.exe`. Enable **DDC/CI** in your external monitor's on-screen menu if the display reports that brightness control is unavailable.
 
 | Shortcut | Action |
 | --- | --- |
@@ -60,9 +60,9 @@ The shared slider sets linked displays to the same percentage; hotkeys and the t
 Click the tray icon to toggle the brightness popup. Press **Esc** or click outside it to dismiss. Open **Settings** or **Schedule** from the popup or the tray context menu. Closing preferences keeps the utility running in the tray. Use **Quit** in the preferences footer or tray menu to exit.
 
 ```powershell
-.\MultiMonitorBrightness-v0.2.3.exe --demo
-.\MultiMonitorBrightness-v0.2.3.exe --portable
-.\MultiMonitorBrightness-v0.2.3.exe --settings
+.\MultiMonitorBrightness-v0.2.4.exe --demo
+.\MultiMonitorBrightness-v0.2.4.exe --portable
+.\MultiMonitorBrightness-v0.2.4.exe --settings
 ```
 
 Normally, settings live in `%APPDATA%\MultiMonitorBrightness\settings.json`. `--portable` stores `multi-monitor-brightness.json` beside the executable instead. The executable is self-contained; the JSON file holds your preferences. Demo mode neither reads nor writes these settings and does not register global shortcuts.
@@ -127,11 +127,11 @@ Settings are written to a same-directory temporary file, synced, then replaced. 
 
 ## Status
 
-Current version: 0.2.3. Automated tests cover brightness scaling, schedule boundaries, shortcut validation, persistence, queued monitor operations, popup placement, release selection, and update verification. Hardware compatibility is not yet certified.
+Current version: 0.2.4. Automated tests cover brightness scaling, schedule boundaries, shortcut validation, persistence, queued monitor operations, popup placement, release selection, and update verification. Hardware compatibility is not yet certified.
 
 Live-window regression checks the brightness popup, separate preferences, reopening and minimizing windows, hidden brightness commands, background dimming/restoration, and Quit. Run `scripts\test-tray.ps1` and `scripts\test-tray.ps1 -Startup` on an interactive Windows desktop. The checks use simulated monitors and the installed menu callback, without injecting mouse/keyboard input or changing physical brightness.
 
-Run `scripts\test-updater.ps1` for a native update regression using an isolated copy in `target`: it waits for a running executable to exit, replaces it, checks the backup, restarts the new copy, and cleans up its own fixture. CI runs this regression too. The optional network check `cargo test public_release_download_verifies -- --ignored --nocapture` downloads and verifies the latest public release without installing or executing it.
+Run `scripts\test-updater.ps1` for a native update regression using an isolated copy in `target`: it waits for a running executable to exit, replaces it, checks the backup, restarts the new copy, and cleans up its own fixture. Both normal process queries and a real Windows access-denied query are covered; replacement still waits for process termination and verifies the installed file hash. CI runs this regression too. The optional network check `cargo test public_release_download_verifies -- --ignored --nocapture` downloads and verifies the latest public release without installing or executing it.
 
 For a release-mode CPU renderer regression on an interactive Windows desktop, run `scripts\test-renderer.ps1`. It uses three seconds of warm-up and five seconds of measurement for Settings, the brightness popup, hidden startup, and a simulated slider drag. Native pointer input is ignored only in this opt-in benchmark, so desktop activity does not contaminate the idle workload. It verifies zero idle rasterizations, zero hidden paints, changing slider frames, and absence of OpenGL/DirectX modules. JSON results stay in `dist/render-tests`. This is a controlled input test; it does not establish subjective mouse latency on every machine.
 
