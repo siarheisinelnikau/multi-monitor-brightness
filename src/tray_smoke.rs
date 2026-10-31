@@ -23,13 +23,14 @@ enum Stage {
 }
 
 pub struct SmokeTest {
-    observe: Box<dyn Fn() -> (bool, bool)>,
+    observe: Box<dyn Fn() -> (bool, bool, [i32; 4])>,
     report: PathBuf,
     started: Instant,
     stage: Stage,
     baseline: Vec<(String, u8)>,
     passed: Vec<&'static str>,
     started_hidden: bool,
+    preferences_position: Option<[i32; 2]>,
 }
 
 impl SmokeTest {
@@ -39,9 +40,17 @@ impl SmokeTest {
         let window = cc.window.clone();
         Some(Self {
             observe: Box::new(move || {
+                let position = window.outer_position().unwrap_or_default();
+                let size = window.outer_size();
                 (
                     window.is_visible().unwrap_or(false),
                     window.is_minimized().unwrap_or(false),
+                    [
+                        position.x,
+                        position.y,
+                        size.width as i32,
+                        size.height as i32,
+                    ],
                 )
             }),
             report: report.into(),
@@ -50,6 +59,7 @@ impl SmokeTest {
             baseline: Vec::new(),
             passed: Vec::new(),
             started_hidden: std::env::args().any(|arg| arg == "--startup"),
+            preferences_position: None,
         })
     }
 
@@ -61,7 +71,7 @@ impl SmokeTest {
             );
             std::process::exit(1);
         }
-        let (preferences, minimized) = (self.observe)();
+        let (preferences, minimized, rectangle) = (self.observe)();
         let (visible, _) = platform::popup_window_state();
         let settled = !app.displays.iter().any(|d| d.queued.is_some() || d.writing);
         let matches = |delta| {
@@ -136,14 +146,35 @@ impl SmokeTest {
                 dispatch(Action::Settings);
                 self.stage = Stage::Settings;
             }
-            Stage::Settings if preferences && !visible => {
+            Stage::Settings if preferences && !visible && !app.preferences_position_pending => {
                 assert!(app.tab == Tab::Settings);
                 self.pass("settings_in_separate_window");
+                let anchor = app.tray.as_ref().unwrap().anchor().expect("tray rectangle");
+                assert!(
+                    platform::preferences_near_tray(
+                        anchor,
+                        [rectangle[0], rectangle[1]],
+                        [rectangle[2] as u32, rectangle[3] as u32],
+                    ),
+                    "Preferences must open next to the tray: {rectangle:?}, {anchor:?}"
+                );
+                self.preferences_position = Some([rectangle[0], rectangle[1]]);
+                self.pass("settings_opens_beside_tray");
                 dispatch(Action::Schedule);
                 self.stage = Stage::Schedule;
             }
             Stage::Schedule if preferences && app.tab == Tab::Evening => {
                 self.pass("schedule_in_preferences_window");
+                assert_eq!(
+                    self.preferences_position,
+                    Some([rectangle[0], rectangle[1]])
+                );
+                self.pass("switching_tabs_preserves_window_position");
+                // Move away first, so restoration must actively return to the tray.
+                ctx.send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::OuterPosition(egui::pos2(24.0, 24.0)),
+                );
                 ctx.send_viewport_cmd_to(
                     egui::ViewportId::ROOT,
                     egui::ViewportCommand::Minimized(true),
@@ -155,8 +186,18 @@ impl SmokeTest {
                 dispatch(Action::Settings);
                 self.stage = Stage::Restored;
             }
-            Stage::Restored if preferences && !minimized => {
+            Stage::Restored if preferences && !minimized && !app.preferences_position_pending => {
                 self.pass("restore_preferences_from_tray");
+                let anchor = app.tray.as_ref().unwrap().anchor().expect("tray rectangle");
+                assert!(
+                    platform::preferences_near_tray(
+                        anchor,
+                        [rectangle[0], rectangle[1]],
+                        [rectangle[2] as u32, rectangle[3] as u32],
+                    ),
+                    "Restored preferences must return to the tray: {rectangle:?}, {anchor:?}"
+                );
+                self.pass("restored_preferences_return_to_tray");
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close);
                 self.stage = Stage::HiddenAgain;
             }
