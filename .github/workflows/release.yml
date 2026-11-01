@@ -62,6 +62,12 @@ jobs:
             const crypto = require('crypto');
             const { owner, repo } = context.repo;
             const tag = process.env.RELEASE_TAG;
+            try {
+              const {data: reference} = await github.rest.git.getRef({owner, repo, ref: `tags/${tag}`});
+              if (reference.object.type !== 'commit' || reference.object.sha !== context.sha) {
+                throw new Error('An existing version tag belongs to another commit.');
+              }
+            } catch (error) { if (error.status !== 404) throw error; }
             const executable = `MultiMonitorBrightness-${tag}.exe`;
             let release;
             try {
