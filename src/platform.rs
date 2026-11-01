@@ -12,12 +12,35 @@ pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
 }
 
+pub fn preferred_language() -> crate::i18n::Language {
+    if std::env::args_os().any(|argument| argument == "--demo") {
+        return crate::i18n::Language::English;
+    }
+    let portable = std::env::args_os().any(|argument| argument == "--portable");
+    crate::config::path(portable)
+        .ok()
+        .and_then(|path| crate::config::load(&path).ok())
+        .map(|settings| settings.language)
+        .unwrap_or_default()
+}
+
 pub fn message(text: &str) {
+    let language = preferred_language();
+    let localized = if let Some(option) = text
+        .strip_prefix("Unknown option: ")
+        .and_then(|text| text.split_once("\n\n").map(|(option, _)| option))
+    {
+        language
+            .text("Unknown option: {option}\n\nUse --help to see available options.")
+            .replace("{option}", option)
+    } else {
+        language.text(text).into()
+    };
     // SAFETY: Strings remain alive for the duration of the modal call.
     unsafe {
         MessageBoxW(
             ptr::null_mut(),
-            wide(text).as_ptr(),
+            wide(&localized).as_ptr(),
             wide("Multi-Monitor Brightness").as_ptr(),
             MB_OK | MB_ICONINFORMATION,
         );

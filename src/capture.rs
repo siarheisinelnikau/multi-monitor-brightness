@@ -69,7 +69,9 @@ pub fn update(ctx: &egui::Context) -> Result<bool, String> {
             "pixels_per_point": ctx.pixels_per_point(),
             "physical_size": [image.width(), image.height()],
             "logical_size": [ctx.viewport_rect().width(), ctx.viewport_rect().height()],
-            "mode": "simulated monitors; renderer scale test, not a Windows DPI setting change"
+            "mode": "simulated monitors; renderer scale test, not a Windows DPI setting change",
+            "language": crate::i18n::current(ctx),
+            "theme": if ctx.theme() == egui::Theme::Dark { "dark" } else { "light" }
         });
         let metadata_path = std::path::PathBuf::from(std::env::var_os("MMB_CAPTURE_TO").unwrap())
             .with_extension("json");
@@ -85,6 +87,9 @@ pub fn update(ctx: &egui::Context) -> Result<bool, String> {
         let requested = data.get_temp::<bool>(id.with("requested")).unwrap_or(false);
         (started, requested)
     });
+    if started.elapsed() > Duration::from_secs(10) {
+        return Err("Screenshot did not complete within ten seconds.".into());
+    }
     if !requested && started.elapsed() >= Duration::from_millis(450) {
         let context = ctx.clone();
         ctx.request_screenshot(move |image| {

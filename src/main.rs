@@ -24,6 +24,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn main() {
     if let Err(error) = run() {
+        #[cfg(feature = "ui-capture")]
+        if std::env::var_os("MMB_CAPTURE_TO").is_some() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
         #[cfg(feature = "updater-smoke-test")]
         if std::env::var_os("MMB_UPDATER_SMOKE").is_some() {
             eprintln!("{error}");
@@ -69,8 +74,18 @@ fn run() -> Result<(), String> {
                 ))
             }
             "--help" | "-h" => {
+                let language = platform::preferred_language();
+                let text = |key: &'static str| language.text(key);
                 platform::message(&format!(
-                    "Multi-Monitor Brightness {VERSION}\n\nBrightness control without leaving the keyboard.\n\n--portable   Keep settings beside the executable\n--startup    Start quietly in the system tray\n--settings   Open preferences instead of the brightness popup\n--demo       Preview with simulated displays; no hardware changes or saved settings\n\nDefault shortcuts: Ctrl + Alt + Up / Down.\nOpen brightness: Ctrl + Alt + B.\nQuit from the tray menu or the application footer."
+                    "Multi-Monitor Brightness {VERSION}\n\n{}\n\n--portable   {}\n--startup    {}\n--settings   {}\n--demo       {}\n\n{}\n{}\n{}",
+                    text("Brightness control without leaving the keyboard."),
+                    text("Keep settings beside the executable"),
+                    text("Start quietly in the system tray"),
+                    text("Open preferences instead of the brightness popup"),
+                    text("Preview with simulated displays; no hardware changes or saved settings"),
+                    text("Default shortcuts: Ctrl + Alt + Up / Down."),
+                    text("Open brightness: Ctrl + Alt + B."),
+                    text("Quit from the tray menu or the application footer.")
                 ));
                 return Ok(());
             }
@@ -79,6 +94,17 @@ fn run() -> Result<(), String> {
                     "Unknown option: {argument}\n\nUse --help to see available options."
                 ));
             }
+        }
+    }
+    #[cfg(feature = "ui-capture")]
+    if std::env::var_os("MMB_CAPTURE_TO").is_some() {
+        if !demo {
+            return Err("Self-capture requires --demo to isolate hardware and preferences.".into());
+        }
+        if let Ok(tab) = std::env::var("MMB_CAPTURE_TAB")
+            && !["popup", "settings", "schedule"].contains(&tab.as_str())
+        {
+            return Err(format!("Unsupported capture screen: {tab}"));
         }
     }
     let Some(_instance) = platform::Instance::acquire(demo)? else {
@@ -92,6 +118,7 @@ fn run() -> Result<(), String> {
         .with_title(platform::PREFERENCES_TITLE)
         .with_inner_size(preferences_size)
         .with_visible(open_settings)
+        .with_active(std::env::var_os("MMB_CAPTURE_TO").is_none())
         .with_min_inner_size(preferences_size.min(egui::vec2(500.0, 360.0)))
         .with_icon(egui::IconData {
             rgba: icon::rgba(64),
