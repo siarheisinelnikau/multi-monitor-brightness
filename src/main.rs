@@ -10,11 +10,14 @@ mod app;
 mod capture;
 mod config;
 mod host;
+mod i18n;
 mod icon;
 mod model;
 mod monitors;
 mod platform;
 mod startup;
+mod theme;
+mod update_panel;
 mod updater;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");

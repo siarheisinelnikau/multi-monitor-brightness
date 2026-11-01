@@ -16,8 +16,9 @@ use std::{
 #[path = "tray_smoke.rs"]
 mod tray_smoke;
 
-use rust_auto_updator_egui::style::{
-    ACCENT, BG, BORDER, CARD, MUTED, TEXT, TRACK, WARM, apply_dark_theme as theme, card,
+use crate::{
+    i18n::{self, Language, tr},
+    theme::{self, Theme, card, palette},
 };
 
 struct Display {
@@ -87,7 +88,6 @@ impl MultiMonitorBrightness {
         open_settings: bool,
         updated: bool,
     ) -> Self {
-        theme(&cc.egui_ctx);
         #[cfg(feature = "ui-capture")]
         if demo {
             crate::capture::configure_scale(&cc.egui_ctx);
@@ -106,7 +106,7 @@ impl MultiMonitorBrightness {
                 }
             }
         };
-        let settings = match config_path.as_ref().map(|p| config::load(p)) {
+        let mut settings = match config_path.as_ref().map(|p| config::load(p)) {
             Some(Ok(settings)) => settings,
             Some(Err(error)) => {
                 notice = Some(error);
@@ -115,6 +115,26 @@ impl MultiMonitorBrightness {
             }
             None => Settings::default(),
         };
+        #[cfg(feature = "ui-capture")]
+        if demo && std::env::var_os("MMB_CAPTURE_TO").is_some() {
+            if let Ok(code) = std::env::var("MMB_CAPTURE_LANGUAGE") {
+                settings.language = Language::from_code(&code).expect("supported capture language");
+            }
+            if let Ok(value) = std::env::var("MMB_CAPTURE_THEME") {
+                settings.theme = match value.as_str() {
+                    "light" => Theme::Light,
+                    "dark" => Theme::Dark,
+                    _ => panic!("unsupported capture theme"),
+                };
+            }
+        }
+        settings.language.install(&cc.egui_ctx);
+        cc.egui_ctx
+            .send_viewport_cmd(egui::ViewportCommand::Title(format!(
+                "Multi-Monitor Brightness — {}",
+                settings.language.text("Preferences")
+            )));
+        theme::initialize(&cc.egui_ctx, settings.theme);
         let monitors = match monitors::Controller::new(cc.egui_ctx.clone(), demo) {
             Ok(service) => Some(service),
             Err(error) => {
@@ -136,7 +156,7 @@ impl MultiMonitorBrightness {
                 }
             }
         };
-        let tray = match platform::Tray::new(cc.egui_ctx.clone()) {
+        let tray = match platform::Tray::new(cc.egui_ctx.clone(), settings.language) {
             Ok(tray) => Some(tray),
             Err(error) => {
                 notice = Some(format!("System tray unavailable: {error}"));
@@ -615,15 +635,14 @@ impl MultiMonitorBrightness {
     fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
-            ui.painter()
-                .rect_filled(rect, 9, Color32::from_rgb(44, 48, 59));
-            sun(ui.painter(), rect.center(), 9.0, ACCENT);
+            ui.painter().rect_filled(rect, 9, palette(ui).track);
+            sun(ui.painter(), rect.center(), 9.0, palette(ui).accent);
             ui.add_space(6.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new("Preferences").size(21.0).strong());
+                ui.label(RichText::new(tr(ui, "Preferences")).size(21.0).strong());
                 ui.label(
                     RichText::new("Multi-Monitor Brightness")
-                        .color(MUTED)
+                        .color(palette(ui).muted)
                         .size(12.0),
                 );
             });
@@ -631,15 +650,22 @@ impl MultiMonitorBrightness {
         ui.add_space(18.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            for (tab, label) in [(Tab::Evening, "Schedule"), (Tab::Settings, "Settings")] {
+            for (tab, label) in [
+                (Tab::Evening, tr(ui, "Schedule")),
+                (Tab::Settings, tr(ui, "Settings")),
+            ] {
                 let active = self.tab == tab;
                 let response = ui.add(
                     egui::Button::new(RichText::new(label).size(13.0).color(if active {
-                        TEXT
+                        palette(ui).text
                     } else {
-                        MUTED
+                        palette(ui).muted
                     }))
-                    .fill(if active { CARD } else { Color32::TRANSPARENT })
+                    .fill(if active {
+                        palette(ui).card
+                    } else {
+                        Color32::TRANSPARENT
+                    })
                     .stroke(Stroke::NONE)
                     .corner_radius(6)
                     .min_size(Vec2::new(92.0, 32.0)),
@@ -648,7 +674,7 @@ impl MultiMonitorBrightness {
                     let line = response.rect.shrink2(Vec2::new(13.0, 0.0));
                     ui.painter().line_segment(
                         [line.left_bottom(), line.right_bottom()],
-                        Stroke::new(2.0, ACCENT),
+                        Stroke::new(2.0, palette(ui).accent),
                     );
                 }
                 if response.clicked() {
@@ -670,7 +696,11 @@ impl MultiMonitorBrightness {
                 .sum::<u32>()
                 / count as u32) as u8;
             ui.horizontal(|ui| {
-                ui.label(RichText::new("All linked displays").size(12.0).color(MUTED));
+                ui.label(
+                    RichText::new(tr(ui, "All linked displays"))
+                        .size(12.0)
+                        .color(palette(ui).muted),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(format!("{average}%")).size(20.0));
                 });
@@ -698,10 +728,10 @@ impl MultiMonitorBrightness {
             if self.scanning {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Finding displays…");
+                    ui.label(tr(ui, "Finding displays…"));
                 });
             } else {
-                ui.label("No displays detected");
+                ui.label(tr(ui, "No displays detected"));
             }
         }
         let supported = self
@@ -745,11 +775,14 @@ impl MultiMonitorBrightness {
                         if ui
                             .checkbox(
                                 &mut memory.included,
-                                RichText::new("Link").size(10.0).color(MUTED),
+                                RichText::new(tr(ui, "Link"))
+                                    .size(10.0)
+                                    .color(palette(ui).muted),
                             )
-                            .on_hover_text(
+                            .on_hover_text(tr(
+                                ui,
                                 "Include in shared controls, hotkeys and the evening schedule",
-                            )
+                            ))
                             .changed()
                         {
                             self.dirty();
@@ -765,7 +798,11 @@ impl MultiMonitorBrightness {
                     self.queue(i, value, true);
                 }
                 if let Some(error) = &self.displays[i].error {
-                    ui.label(RichText::new(error).size(11.0).color(WARM));
+                    ui.label(
+                        RichText::new(tr(ui, error))
+                            .size(11.0)
+                            .color(palette(ui).warm),
+                    );
                 }
                 ui.add_space(10.0);
             });
@@ -773,13 +810,14 @@ impl MultiMonitorBrightness {
         let unavailable = self.displays.len() - supported;
         if unavailable > 0 {
             if ui
-                .small_button(format!(
-                    "{unavailable} {} unavailable",
+                .small_button(i18n::format(
+                    ui,
                     if unavailable == 1 {
-                        "display"
+                        "{count} display unavailable"
                     } else {
-                        "displays"
-                    }
+                        "{count} displays unavailable"
+                    },
+                    &[("count", unavailable.to_string())],
                 ))
                 .clicked()
             {
@@ -787,19 +825,23 @@ impl MultiMonitorBrightness {
             }
             if self.popup_details {
                 for d in self.displays.iter().filter(|d| d.info.brightness.is_none()) {
-                    ui.label(RichText::new(&d.info.name).size(11.0).color(MUTED));
+                    ui.label(
+                        RichText::new(&d.info.name)
+                            .size(11.0)
+                            .color(palette(ui).muted),
+                    );
                 }
-                ui.label(RichText::new("Enable DDC/CI in the monitor's menu, then refresh. Some built-in screens and docks are not supported.").size(11.0).color(MUTED));
+                ui.label(RichText::new(tr(ui, "Enable DDC/CI in the monitor's menu, then refresh. Some built-in screens and docks are not supported.")).size(11.0).color(palette(ui).muted));
             }
         }
         if self.settings.schedule.enabled {
             ui.label(
                 RichText::new(if self.paused_cycle.is_some() {
-                    "Evening dimming paused until morning"
+                    tr(ui, "Evening dimming paused until morning")
                 } else {
-                    "Evening dimming enabled"
+                    tr(ui, "Evening dimming enabled")
                 })
-                .color(MUTED)
+                .color(palette(ui).muted)
                 .size(10.0),
             );
         }
@@ -829,19 +871,23 @@ impl MultiMonitorBrightness {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(BG)
-                    .stroke(Stroke::new(1.0, BORDER))
+                    .fill(palette(ui).bg)
+                    .stroke(Stroke::new(1.0, palette(ui).border))
                     .inner_margin(16)
                     .corner_radius(10),
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Brightness").size(17.0).strong());
+                    ui.label(RichText::new(tr(ui, "Brightness")).size(17.0).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text("Close · Esc").clicked() {
+                        if ui
+                            .small_button("×")
+                            .on_hover_text(tr(ui, "Close · Esc"))
+                            .clicked()
+                        {
                             self.hide_popup(&ctx);
                         }
-                        if ui.small_button("Settings").clicked() {
+                        if ui.small_button(tr(ui, "Settings")).clicked() {
                             self.open_preferences(Tab::Settings, &ctx);
                         }
                     });
@@ -857,7 +903,8 @@ impl MultiMonitorBrightness {
                     if ui
                         .add_enabled(
                             !self.scanning,
-                            egui::Button::new(RichText::new("Refresh").size(11.0)).frame(false),
+                            egui::Button::new(RichText::new(tr(ui, "Refresh")).size(11.0))
+                                .frame(false),
                         )
                         .clicked()
                         && let Some(service) = &self.monitors
@@ -866,18 +913,25 @@ impl MultiMonitorBrightness {
                         self.scanning = true;
                     }
                     if ui
-                        .add(egui::Button::new(RichText::new("Schedule").size(11.0)).frame(false))
+                        .add(
+                            egui::Button::new(RichText::new(tr(ui, "Schedule")).size(11.0))
+                                .frame(false),
+                        )
                         .clicked()
                     {
                         self.open_preferences(Tab::Evening, &ctx);
                     }
                     if self.updates.update_available()
-                        && ui.small_button("Update available").clicked()
+                        && ui.small_button(tr(ui, "Update available")).clicked()
                     {
                         self.open_preferences(Tab::Settings, &ctx);
                     }
                     if self.demo {
-                        ui.label(RichText::new("Preview").size(10.0).color(MUTED));
+                        ui.label(
+                            RichText::new(tr(ui, "Preview"))
+                                .size(10.0)
+                                .color(palette(ui).muted),
+                        );
                     }
                 });
             });
@@ -914,25 +968,35 @@ impl MultiMonitorBrightness {
     }
 
     fn evening_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Evening schedule").size(20.0).strong());
+        ui.label(
+            RichText::new(tr(ui, "Evening schedule"))
+                .size(20.0)
+                .strong(),
+        );
         ui.add_space(5.0);
         ui.label(
-            RichText::new("Lower brightness gradually, then restore it in the morning.")
-                .color(MUTED),
+            RichText::new(tr(
+                ui,
+                "Lower brightness gradually, then restore it in the morning.",
+            ))
+            .color(palette(ui).muted),
         );
         ui.add_space(22.0);
         let previous = self.settings.schedule.clone();
         card(ui, |ui| {
             ui.checkbox(
                 &mut self.settings.schedule.enabled,
-                RichText::new("Smooth evening dimming").size(16.0).strong(),
+                RichText::new(tr(ui, "Smooth evening dimming"))
+                    .size(16.0)
+                    .strong(),
             );
             ui.add_space(8.0);
             ui.label(
-                RichText::new(
+                RichText::new(tr(
+                    ui,
                     "Gradually dim linked displays. Your usual brightness returns in the morning.",
-                )
-                .color(MUTED)
+                ))
+                .color(palette(ui).muted)
                 .size(13.0),
             );
             ui.add_space(20.0);
@@ -940,20 +1004,20 @@ impl MultiMonitorBrightness {
                 .num_columns(2)
                 .spacing([28.0, 18.0])
                 .show(ui, |ui| {
-                    ui.label("Start dimming");
+                    ui.label(tr(ui, "Start dimming"));
                     time_editor(ui, &mut self.settings.schedule.start, "evening_start");
                     ui.end_row();
-                    ui.label("Restore brightness");
+                    ui.label(tr(ui, "Restore brightness"));
                     time_editor(ui, &mut self.settings.schedule.morning, "morning_start");
                     ui.end_row();
-                    ui.label("Fade duration");
+                    ui.label(tr(ui, "Fade duration"));
                     ui.add(
                         egui::DragValue::new(&mut self.settings.schedule.duration)
                             .range(1..=240)
-                            .suffix(" min"),
+                            .suffix(tr(ui, " min")),
                     );
                     ui.end_row();
-                    ui.label("Evening brightness");
+                    ui.label(tr(ui, "Evening brightness"));
                     ui.add(
                         egui::DragValue::new(&mut self.settings.schedule.target)
                             .range(0..=100)
@@ -972,74 +1036,154 @@ impl MultiMonitorBrightness {
         if self.settings.schedule.start == self.settings.schedule.morning {
             ui.add_space(12.0);
             ui.label(
-                RichText::new(
+                RichText::new(tr(
+                    ui,
                     "Choose different evening and morning times to activate the schedule.",
-                )
-                .color(WARM),
+                ))
+                .color(palette(ui).warm),
             );
         }
         ui.add_space(16.0);
-        ui.label(RichText::new("Manual adjustments").size(13.0).strong());
-        ui.label(RichText::new("Changing brightness pauses the schedule until morning. Displays below the target stay at their lower level. Times follow your computer's local clock.").color(MUTED).size(12.0));
+        ui.label(
+            RichText::new(tr(ui, "Manual adjustments"))
+                .size(13.0)
+                .strong(),
+        );
+        ui.label(RichText::new(tr(ui, "Changing brightness pauses the schedule until morning. Displays below the target stay at their lower level. Times follow your computer's local clock.")).color(palette(ui).muted).size(12.0));
         if self.paused_cycle.is_some() {
             ui.add_space(8.0);
-            if ui.button("Resume evening dimming").clicked() {
+            if ui.button(tr(ui, "Resume evening dimming")).clicked() {
                 self.paused_cycle = None;
             }
         }
     }
 
+    fn appearance_ui(&mut self, ui: &mut egui::Ui) {
+        let previous_language = self.settings.language;
+        let previous_theme = self.settings.theme;
+        card(ui, |ui| {
+            ui.label(RichText::new(tr(ui, "Appearance")).size(17.0).strong());
+            ui.add_space(10.0);
+            egui::Grid::new("appearance")
+                .spacing([24.0, 10.0])
+                .show(ui, |ui| {
+                    ui.label(tr(ui, "Language"));
+                    egui::ComboBox::from_id_salt("language")
+                        .selected_text(self.settings.language.name())
+                        .show_ui(ui, |ui| {
+                            for language in Language::ALL {
+                                ui.selectable_value(
+                                    &mut self.settings.language,
+                                    language,
+                                    language.name(),
+                                );
+                            }
+                        });
+                    ui.end_row();
+                    ui.label(tr(ui, "Theme"));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(
+                            &mut self.settings.theme,
+                            Theme::Light,
+                            tr(ui, "Light"),
+                        );
+                        ui.selectable_value(&mut self.settings.theme, Theme::Dark, tr(ui, "Dark"));
+                    });
+                    ui.end_row();
+                });
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(tr(ui, "Language and theme changes apply immediately."))
+                    .size(11.0)
+                    .color(palette(ui).muted),
+            );
+        });
+        if previous_language != self.settings.language {
+            self.settings.language.install(ui.ctx());
+            if let Some(tray) = &self.tray {
+                tray.set_language(self.settings.language);
+            }
+            ui.ctx().send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::Title(format!(
+                    "Multi-Monitor Brightness — {}",
+                    self.settings.language.text("Preferences")
+                )),
+            );
+            ui.ctx().request_repaint();
+        }
+        if previous_theme != self.settings.theme {
+            self.settings.theme.apply(ui.ctx());
+        }
+        if previous_language != self.settings.language || previous_theme != self.settings.theme {
+            self.dirty();
+        }
+    }
+
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Settings").size(20.0).strong());
+            ui.label(RichText::new(tr(ui, "Settings")).size(20.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
-                    RichText::new(format!("Version {}", crate::VERSION))
-                        .size(12.0)
-                        .color(MUTED),
+                    RichText::new(i18n::format(
+                        ui,
+                        "Version {version}",
+                        &[("version", crate::VERSION.into())],
+                    ))
+                    .size(12.0)
+                    .color(palette(ui).muted),
                 );
             });
         });
         ui.add_space(18.0);
+        self.appearance_ui(ui);
+        ui.add_space(12.0);
         self.updates_ui(ui);
         ui.add_space(12.0);
         card(ui, |ui| {
-            ui.label(RichText::new("Application").size(17.0).strong());
+            ui.label(RichText::new(tr(ui, "Application")).size(17.0).strong());
             ui.add_space(10.0);
             let mut enabled = self.startup_status.enabled;
             if ui
                 .add_enabled(
                     !self.demo,
-                    egui::Checkbox::new(&mut enabled, "Start with Windows"),
+                    egui::Checkbox::new(&mut enabled, tr(ui, "Start with Windows")),
                 )
-                .on_hover_text("Start quietly in the system tray when you sign in")
+                .on_hover_text(tr(ui, "Start quietly in the system tray when you sign in"))
                 .changed()
             {
                 self.set_startup(enabled);
             }
             ui.label(
-                RichText::new("Starts in the tray when you sign in.")
+                RichText::new(tr(ui, "Starts in the tray when you sign in."))
                     .size(11.0)
-                    .color(MUTED),
+                    .color(palette(ui).muted),
             );
             if self.startup_status.enabled && !self.startup_status.uses_current_copy {
                 ui.label(
-                    RichText::new("Autostart currently uses another copy of the app.")
+                    RichText::new(tr(ui, "Autostart currently uses another copy of the app."))
                         .size(12.0)
-                        .color(MUTED),
+                        .color(palette(ui).muted),
                 );
-                if ui.button("Use this executable").clicked() {
+                if ui.button(tr(ui, "Use this executable")).clicked() {
                     self.set_startup(true);
                 }
             }
             if let Some(error) = &self.startup_error {
-                ui.label(RichText::new(error).size(12.0).color(WARM));
+                ui.label(
+                    RichText::new(tr(ui, error))
+                        .size(12.0)
+                        .color(palette(ui).warm),
+                );
             }
             ui.add_space(6.0);
             if ui
                 .checkbox(
                     &mut self.settings.restore_on_start,
-                    "Restore each display's brightness on launch / reconnect",
+                    tr(
+                        ui,
+                        "Restore each display's brightness on launch / reconnect",
+                    ),
                 )
                 .changed()
             {
@@ -1048,53 +1192,60 @@ impl MultiMonitorBrightness {
             ui.add_space(12.0);
             if let Some(path) = &self.config_path {
                 ui.label(
-                    RichText::new("Settings are saved automatically")
+                    RichText::new(tr(ui, "Settings are saved automatically"))
                         .size(12.0)
-                        .color(MUTED),
+                        .color(palette(ui).muted),
                 );
                 ui.label(
                     RichText::new(path.display().to_string())
                         .size(11.0)
-                        .color(MUTED),
+                        .color(palette(ui).muted),
                 );
             } else if self.demo {
                 ui.label(
-                    RichText::new("Demo settings are temporary.")
+                    RichText::new(tr(ui, "Demo settings are temporary."))
                         .size(12.0)
-                        .color(MUTED),
+                        .color(palette(ui).muted),
                 );
             }
             if self.save_blocked {
-                ui.label(RichText::new("Saving is paused to preserve your original settings. Fix or move the settings file and restart.").color(WARM).size(12.0));
+                ui.label(RichText::new(tr(ui, "Saving is paused to preserve your original settings. Fix or move the settings file and restart.")).color(palette(ui).warm).size(12.0));
             }
         });
         ui.add_space(12.0);
         card(ui, |ui| {
-            ui.label(RichText::new("Keyboard shortcuts").size(17.0).strong());
+            ui.label(
+                RichText::new(tr(ui, "Keyboard shortcuts"))
+                    .size(17.0)
+                    .strong(),
+            );
             ui.add_space(10.0);
-            ui.checkbox(&mut self.hotkey_draft.enabled, "Enable global shortcuts");
+            ui.checkbox(
+                &mut self.hotkey_draft.enabled,
+                tr(ui, "Enable global shortcuts"),
+            );
             ui.add_space(10.0);
             hotkey_editor(
                 ui,
-                "Increase brightness",
+                tr(ui, "Increase brightness"),
                 "key_up",
                 &mut self.hotkey_draft.up,
             );
             hotkey_editor(
                 ui,
-                "Decrease brightness",
+                tr(ui, "Decrease brightness"),
                 "key_down",
                 &mut self.hotkey_draft.down,
             );
             hotkey_editor(
                 ui,
-                "Open brightness",
+                tr(ui, "Open brightness"),
                 "key_show",
                 &mut self.hotkey_draft.show,
             );
             ui.add_space(13.0);
             ui.horizontal(|ui| {
-                ui.label("Brightness step");
+                ui.label(tr(ui, "Brightness step"));
                 if ui
                     .add(
                         egui::DragValue::new(&mut self.settings.step)
@@ -1110,7 +1261,7 @@ impl MultiMonitorBrightness {
             if ui
                 .add_enabled(
                     !self.shortcuts_pending,
-                    egui::Button::new("Apply shortcuts"),
+                    egui::Button::new(tr(ui, "Apply shortcuts")),
                 )
                 .clicked()
             {
@@ -1129,28 +1280,38 @@ impl MultiMonitorBrightness {
             }
             ui.add_space(7.0);
             let (text, color) = if self.demo {
-                ("Shortcuts are preview-only in demo mode.", MUTED)
+                (
+                    tr(ui, "Shortcuts are preview-only in demo mode."),
+                    palette(ui).muted,
+                )
             } else if let Some(error) = self.shortcut_error.as_deref() {
-                (error, WARM)
+                (error, palette(ui).warm)
             } else if self.shortcuts_pending {
-                ("Registering shortcuts…", MUTED)
+                (tr(ui, "Registering shortcuts…"), palette(ui).muted)
             } else if self.hotkeys.is_none() {
                 (
-                    "Shortcut service unavailable. Restart the application.",
-                    WARM,
+                    tr(ui, "Shortcut service unavailable. Restart the application."),
+                    palette(ui).warm,
                 )
             } else if self.settings.hotkeys.enabled {
                 (
-                    "Shortcuts are active, including while the window is hidden.",
-                    MUTED,
+                    tr(
+                        ui,
+                        "Shortcuts are active, including while the window is hidden.",
+                    ),
+                    palette(ui).muted,
                 )
             } else {
-                ("Global shortcuts are disabled.", MUTED)
+                (tr(ui, "Global shortcuts are disabled."), palette(ui).muted)
             };
-            ui.label(RichText::new(text).size(12.0).color(color));
+            ui.label(RichText::new(tr(ui, text)).size(12.0).color(color));
         });
         ui.add_space(15.0);
-        ui.label(RichText::new("MIT License").color(MUTED).size(12.0));
+        ui.label(
+            RichText::new(tr(ui, "MIT License"))
+                .color(palette(ui).muted)
+                .size(12.0),
+        );
     }
 }
 
@@ -1238,13 +1399,11 @@ struct BackgroundVisualState {
 
 impl MultiMonitorBrightness {
     fn updates_ui(&mut self, ui: &mut egui::Ui) {
-        if rust_auto_updator_egui::show(
+        if crate::update_panel::show(
             ui,
             &mut self.updates,
             &mut self.settings.check_updates_automatically,
-        )
-        .preference_changed
-        {
+        ) {
             self.dirty();
         }
     }
@@ -1303,7 +1462,10 @@ impl crate::host::App for Application {
                 let (position, size) =
                     platform::popup_geometry(app.popup_anchor, app.popup_size(), &ctx);
                 egui::ViewportBuilder::default()
-                    .with_title(platform::POPUP_TITLE)
+                    .with_title(format!(
+                        "Multi-Monitor Brightness — {}",
+                        app.settings.language.text("Brightness")
+                    ))
                     .with_visible(true)
                     .with_decorations(false)
                     .with_resizable(false)
@@ -1368,24 +1530,24 @@ impl MultiMonitorBrightness {
         egui::Panel::bottom("footer")
             .frame(
                 egui::Frame::new()
-                    .fill(BG)
+                    .fill(palette(root).bg)
                     .inner_margin(egui::Margin::symmetric(24, 11)),
             )
             .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(if self.quitting.is_some() {
-                            "Finishing brightness changes…"
+                            tr(ui, "Finishing brightness changes…")
                         } else if self.demo {
-                            "Preview · Simulated displays"
+                            tr(ui, "Preview · Simulated displays")
                         } else {
-                            "Changes are saved automatically"
+                            tr(ui, "Changes are saved automatically")
                         })
                         .size(11.0)
-                        .color(MUTED),
+                        .color(palette(ui).muted),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Quit").clicked() {
+                        if ui.small_button(tr(ui, "Quit")).clicked() {
                             self.action(Action::Quit, ctx);
                         }
                     });
@@ -1394,20 +1556,26 @@ impl MultiMonitorBrightness {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(BG)
+                    .fill(palette(root).bg)
                     .inner_margin(egui::Margin::symmetric(24, 22)),
             )
             .show(root, |ui| {
                 self.header(ui);
                 if let Some(notice) = self.notice.clone() {
                     egui::Frame::new()
-                        .fill(Color32::from_rgb(45, 39, 34))
+                        .fill(palette(ui).warning_bg)
                         .inner_margin(12)
                         .corner_radius(8)
                         .show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new(notice).color(WARM).size(12.0));
-                                if !self.save_blocked && ui.small_button("Dismiss").clicked() {
+                                ui.label(
+                                    RichText::new(tr(ui, &notice))
+                                        .color(palette(ui).warm)
+                                        .size(12.0),
+                                );
+                                if !self.save_blocked
+                                    && ui.small_button(tr(ui, "Dismiss")).clicked()
+                                {
                                     self.notice = None;
                                 }
                             });
@@ -1417,11 +1585,11 @@ impl MultiMonitorBrightness {
                 if self.shortcut_error.is_some() && self.tab != Tab::Settings {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("A keyboard shortcut is unavailable.")
-                                .color(WARM)
+                            RichText::new(tr(ui, "A keyboard shortcut is unavailable."))
+                                .color(palette(ui).warm)
                                 .size(12.0),
                         );
-                        if ui.small_button("Fix in Settings").clicked() {
+                        if ui.small_button(tr(ui, "Fix in Settings")).clicked() {
                             self.tab = Tab::Settings;
                         }
                     });
@@ -1504,25 +1672,27 @@ fn brightness_slider(ui: &mut egui::Ui, value: &mut u8, width: f32) -> egui::Res
     if old != *value {
         response.mark_changed();
     }
-    response.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), *value as f64, "Brightness"));
+    response.widget_info(|| {
+        egui::WidgetInfo::slider(ui.is_enabled(), *value as f64, tr(ui, "Brightness"))
+    });
     let y = track.center().y;
     let x = egui::lerp(track.x_range(), *value as f32 / 100.0);
     ui.painter().line_segment(
         [egui::pos2(track.left(), y), egui::pos2(track.right(), y)],
-        Stroke::new(4.0, TRACK),
+        Stroke::new(4.0, palette(ui).track),
     );
     ui.painter().line_segment(
         [egui::pos2(track.left(), y), egui::pos2(x, y)],
-        Stroke::new(4.0, ACCENT),
+        Stroke::new(4.0, palette(ui).accent),
     );
     ui.painter().circle_filled(
         egui::pos2(x, y),
         if response.dragged() { 7.0 } else { 6.0 },
-        TEXT,
+        palette(ui).text,
     );
     if response.has_focus() {
         ui.painter()
-            .circle_stroke(egui::pos2(x, y), 10.0, Stroke::new(1.0, ACCENT));
+            .circle_stroke(egui::pos2(x, y), 10.0, Stroke::new(1.0, palette(ui).accent));
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -1554,14 +1724,14 @@ fn hotkey_editor(ui: &mut egui::Ui, label: &str, id: &str, key: &mut Hotkey) {
         ui.horizontal(|ui| {
             ui.add_sized(
                 [126.0, 25.0],
-                egui::Label::new(RichText::new(label).size(12.0).color(MUTED)),
+                egui::Label::new(RichText::new(label).size(12.0).color(palette(ui).muted)),
             );
             ui.checkbox(&mut key.ctrl, "Ctrl");
             ui.checkbox(&mut key.alt, "Alt");
             ui.checkbox(&mut key.shift, "Shift");
             egui::ComboBox::from_id_salt("key")
                 .width(96.0)
-                .selected_text(&key.key)
+                .selected_text(tr(ui, &key.key))
                 .show_ui(ui, |ui| {
                     for name in [
                         "Up",
@@ -1573,7 +1743,7 @@ fn hotkey_editor(ui: &mut egui::Ui, label: &str, id: &str, key: &mut Hotkey) {
                         "Home",
                         "End",
                     ] {
-                        ui.selectable_value(&mut key.key, name.into(), name);
+                        ui.selectable_value(&mut key.key, name.into(), tr(ui, name));
                     }
                     for n in 1..=11 {
                         let name = format!("F{n}");
@@ -1601,24 +1771,33 @@ fn schedule_graph(ui: &mut egui::Ui, schedule: &model::Schedule) {
     let to = egui::pos2(chart.right(), lower);
     ui.painter().line_segment(
         [egui::pos2(chart.left(), lower), to],
-        Stroke::new(1.0, BORDER),
+        Stroke::new(1.0, palette(ui).border),
     );
     let points = vec![from, to];
-    ui.painter()
-        .add(egui::Shape::line(points, Stroke::new(2.0, ACCENT)));
+    ui.painter().add(egui::Shape::line(
+        points,
+        Stroke::new(2.0, palette(ui).accent),
+    ));
     ui.painter().text(
         rect.left_bottom(),
         egui::Align2::LEFT_BOTTOM,
         format!("{:02}:{:02}", schedule.start / 60, schedule.start % 60),
         FontId::proportional(11.0),
-        MUTED,
+        palette(ui).muted,
     );
     ui.painter().text(
         rect.right_bottom(),
         egui::Align2::RIGHT_BOTTOM,
-        format!("{} min → {}%", schedule.duration, schedule.target),
+        i18n::format(
+            ui,
+            "{minutes} min → {target}%",
+            &[
+                ("minutes", schedule.duration.to_string()),
+                ("target", schedule.target.to_string()),
+            ],
+        ),
         FontId::proportional(11.0),
-        MUTED,
+        palette(ui).muted,
     );
 }
 
@@ -1691,7 +1870,7 @@ mod tests {
     fn rendering_controls_does_not_change_brightness() {
         let mut app = app();
         let ctx = egui::Context::default();
-        theme(&ctx);
+        theme::initialize(&ctx, Theme::Dark);
         for _ in 0..3 {
             let mut output = ctx.run_ui(
                 egui::RawInput {

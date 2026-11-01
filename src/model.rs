@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub language: crate::i18n::Language,
+    pub theme: crate::theme::Theme,
     pub restore_on_start: bool,
     pub close_to_tray: bool,
     pub step: u8,
@@ -17,6 +19,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            language: crate::i18n::Language::default(),
+            theme: crate::theme::Theme::default(),
             restore_on_start: true,
             close_to_tray: true,
             step: 5,
@@ -233,6 +237,27 @@ impl Hotkeys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_settings_keep_brightness_and_new_appearance_preferences_round_trip() {
+        let old: Settings = serde_json::from_str(r#"{"step":9,"restore_on_start":false}"#).unwrap();
+        assert_eq!(old.language, crate::i18n::Language::English);
+        assert_eq!(old.theme, crate::theme::Theme::Dark);
+        assert_eq!(old.step, 9);
+        assert!(!old.restore_on_start);
+        for language in crate::i18n::Language::ALL {
+            let settings = Settings {
+                language,
+                theme: crate::theme::Theme::Light,
+                ..old.clone()
+            };
+            let loaded: Settings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(loaded.language, language);
+            assert_eq!(loaded.theme, crate::theme::Theme::Light);
+            assert_eq!(loaded.step, 9);
+        }
+    }
 
     #[test]
     fn startup_update_opt_out_survives_saved_settings_and_older_preferences() {
