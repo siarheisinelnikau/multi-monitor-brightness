@@ -1095,7 +1095,7 @@ impl MultiMonitorBrightness {
                         });
                     ui.end_row();
                     ui.label(tr(ui, "Theme"));
-                    ui.horizontal_wrapped(|ui| {
+                    ui.horizontal(|ui| {
                         ui.selectable_value(
                             &mut self.settings.theme,
                             Theme::Light,
