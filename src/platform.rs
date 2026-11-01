@@ -72,6 +72,7 @@ pub enum Action {
 }
 
 pub const PREFERENCES_TITLE: &str = "Multi-Monitor Brightness — Preferences";
+#[cfg(feature = "tray-smoke-test")]
 pub const POPUP_TITLE: &str = "Multi-Monitor Brightness — Brightness";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -437,6 +438,7 @@ pub fn local_clock() -> (i64, u16) {
 
 pub struct Tray {
     _icon: tray_icon::TrayIcon,
+    menu_items: [tray_icon::menu::MenuItem; 7],
     pub events: mpsc::Receiver<Action>,
     #[cfg(feature = "tray-smoke-test")]
     menu_handler: std::sync::Arc<dyn Fn(tray_icon::menu::MenuEvent) + Send + Sync>,
@@ -447,18 +449,18 @@ pub struct Tray {
 }
 
 impl Tray {
-    pub fn new(ctx: egui::Context) -> Result<Self, String> {
+    pub fn new(ctx: egui::Context, language: crate::i18n::Language) -> Result<Self, String> {
         use tray_icon::{
             Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
             menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
         };
-        let show = MenuItem::new("Brightness", true, None);
-        let settings = MenuItem::new("Settings", true, None);
-        let schedule = MenuItem::new("Schedule", true, None);
-        let updates = MenuItem::new("Check for updates", true, None);
-        let up = MenuItem::new("Brightness +", true, None);
-        let down = MenuItem::new("Brightness -", true, None);
-        let quit = MenuItem::new("Quit Multi-Monitor Brightness", true, None);
+        let show = MenuItem::new(language.text("Brightness"), true, None);
+        let settings = MenuItem::new(language.text("Settings"), true, None);
+        let schedule = MenuItem::new(language.text("Schedule"), true, None);
+        let updates = MenuItem::new(language.text("Check for updates"), true, None);
+        let up = MenuItem::new(language.text("Brightness +"), true, None);
+        let down = MenuItem::new(language.text("Brightness -"), true, None);
+        let quit = MenuItem::new(language.text("Quit Multi-Monitor Brightness"), true, None);
         let menu = Menu::with_items(&[
             &show,
             &settings,
@@ -537,6 +539,7 @@ impl Tray {
             .map_err(|e| e.to_string())?;
         Ok(Self {
             _icon: tray,
+            menu_items: [show, settings, schedule, updates, up, down, quit],
             events,
             #[cfg(feature = "tray-smoke-test")]
             menu_handler,
@@ -545,6 +548,20 @@ impl Tray {
             #[cfg(feature = "tray-smoke-test")]
             click_handler,
         })
+    }
+
+    pub fn set_language(&self, language: crate::i18n::Language) {
+        for (item, key) in self.menu_items.iter().zip([
+            "Brightness",
+            "Settings",
+            "Schedule",
+            "Check for updates",
+            "Brightness +",
+            "Brightness -",
+            "Quit Multi-Monitor Brightness",
+        ]) {
+            item.set_text(language.text(key));
+        }
     }
 
     pub fn anchor(&self) -> Option<Anchor> {
