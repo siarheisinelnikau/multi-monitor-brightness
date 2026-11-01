@@ -106,7 +106,7 @@ impl MultiMonitorBrightness {
                 }
             }
         };
-        let mut settings = match config_path.as_ref().map(|p| config::load(p)) {
+        let settings = match config_path.as_ref().map(|p| config::load(p)) {
             Some(Ok(settings)) => settings,
             Some(Err(error)) => {
                 notice = Some(error);
@@ -116,18 +116,23 @@ impl MultiMonitorBrightness {
             None => Settings::default(),
         };
         #[cfg(feature = "ui-capture")]
-        if demo && std::env::var_os("MMB_CAPTURE_TO").is_some() {
-            if let Ok(code) = std::env::var("MMB_CAPTURE_LANGUAGE") {
-                settings.language = Language::from_code(&code).expect("supported capture language");
+        let settings = {
+            let mut settings = settings;
+            if demo && std::env::var_os("MMB_CAPTURE_TO").is_some() {
+                if let Ok(code) = std::env::var("MMB_CAPTURE_LANGUAGE") {
+                    settings.language =
+                        Language::from_code(&code).expect("supported capture language");
+                }
+                if let Ok(value) = std::env::var("MMB_CAPTURE_THEME") {
+                    settings.theme = match value.as_str() {
+                        "light" => Theme::Light,
+                        "dark" => Theme::Dark,
+                        _ => panic!("unsupported capture theme"),
+                    };
+                }
             }
-            if let Ok(value) = std::env::var("MMB_CAPTURE_THEME") {
-                settings.theme = match value.as_str() {
-                    "light" => Theme::Light,
-                    "dark" => Theme::Dark,
-                    _ => panic!("unsupported capture theme"),
-                };
-            }
-        }
+            settings
+        };
         settings.language.install(&cc.egui_ctx);
         cc.egui_ctx
             .send_viewport_cmd(egui::ViewportCommand::Title(format!(
@@ -214,7 +219,7 @@ impl MultiMonitorBrightness {
             preferences_position_pending: preferences_open,
             popup_open,
             popup_had_focus: false,
-            popup_focus_pending: popup_open,
+            popup_focus_pending: popup_open && std::env::var_os("MMB_CAPTURE_TO").is_none(),
             popup_anchor,
             popup_details: false,
             updates,
@@ -758,14 +763,19 @@ impl MultiMonitorBrightness {
                         |ui| {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(&self.displays[i].info.name).size(13.0),
+                                    RichText::new(if self.demo {
+                                        tr(ui, &self.displays[i].info.name)
+                                    } else {
+                                        &self.displays[i].info.name
+                                    })
+                                    .size(13.0),
                                 )
                                 .truncate(),
                             )
                         },
                     )
                     .inner
-                    .on_hover_text(&self.displays[i].info.detail);
+                    .on_hover_text(i18n::display_detail(ui, &self.displays[i].info.detail));
                     if supported > 1 || !self.included(i) {
                         let memory = self
                             .settings
@@ -799,7 +809,7 @@ impl MultiMonitorBrightness {
                 }
                 if let Some(error) = &self.displays[i].error {
                     ui.label(
-                        RichText::new(tr(ui, error))
+                        RichText::new(i18n::message(ui, error))
                             .size(11.0)
                             .color(palette(ui).warm),
                     );
@@ -826,9 +836,13 @@ impl MultiMonitorBrightness {
             if self.popup_details {
                 for d in self.displays.iter().filter(|d| d.info.brightness.is_none()) {
                     ui.label(
-                        RichText::new(&d.info.name)
-                            .size(11.0)
-                            .color(palette(ui).muted),
+                        RichText::new(if self.demo {
+                            tr(ui, &d.info.name)
+                        } else {
+                            &d.info.name
+                        })
+                        .size(11.0)
+                        .color(palette(ui).muted),
                     );
                 }
                 ui.label(RichText::new(tr(ui, "Enable DDC/CI in the monitor's menu, then refresh. Some built-in screens and docks are not supported.")).size(11.0).color(palette(ui).muted));
@@ -1171,7 +1185,7 @@ impl MultiMonitorBrightness {
             }
             if let Some(error) = &self.startup_error {
                 ui.label(
-                    RichText::new(tr(ui, error))
+                    RichText::new(i18n::message(ui, error))
                         .size(12.0)
                         .color(palette(ui).warm),
                 );
@@ -1304,7 +1318,11 @@ impl MultiMonitorBrightness {
             } else {
                 (tr(ui, "Global shortcuts are disabled."), palette(ui).muted)
             };
-            ui.label(RichText::new(tr(ui, text)).size(12.0).color(color));
+            ui.label(
+                RichText::new(i18n::message(ui, text))
+                    .size(12.0)
+                    .color(color),
+            );
         });
         ui.add_space(15.0);
         ui.label(
@@ -1470,7 +1488,7 @@ impl crate::host::App for Application {
                     .with_decorations(false)
                     .with_resizable(false)
                     .with_taskbar(false)
-                    .with_active(true)
+                    .with_active(std::env::var_os("MMB_CAPTURE_TO").is_none())
                     .with_window_level(egui::WindowLevel::AlwaysOnTop)
                     .with_inner_size(size)
                     .with_position(position)
@@ -1569,7 +1587,7 @@ impl MultiMonitorBrightness {
                         .show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
                                 ui.label(
-                                    RichText::new(tr(ui, &notice))
+                                    RichText::new(i18n::message(ui, &notice))
                                         .color(palette(ui).warm)
                                         .size(12.0),
                                 );

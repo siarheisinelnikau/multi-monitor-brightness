@@ -6,7 +6,7 @@ An unobtrusive Windows utility for controlling external monitor brightness from 
 
 ## Download
 
-Download [**MultiMonitorBrightness-v0.2.5.exe**](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/download/v0.2.5/MultiMonitorBrightness-v0.2.5.exe) from the [latest release](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/latest). Windows 10/11 x64; no installer or additional runtime required. Save it in a writable folder and run it.
+Download [**MultiMonitorBrightness-v0.3.0.exe**](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/download/v0.3.0/MultiMonitorBrightness-v0.3.0.exe) from the [latest release](https://github.com/siarheisinelnikau/multi-monitor-brightness/releases/latest). Windows 10/11 x64; no installer or additional runtime required. Save it in a writable folder and run it.
 
 **Upgrading from 0.2.0:** download the latest release manually, quit the old app from the tray, and replace your previous executable. Version 0.2.0 expects the old download name and cannot install releases that use versioned filenames. Normal AppData settings are kept. For portable mode, keep the existing `multi-monitor-brightness.json` beside the executable and launch with `--portable`. If you change the installed filename, update **Settings → Application → Use this executable** when Windows startup is enabled. From 0.2.1 onward, in-app updates support the versioned release names and preserve the installed filename and startup path.
 
@@ -36,6 +36,8 @@ Actual application screenshots captured in preview mode with simulated monitors.
 - Per-monitor brightness memory, restored on launch and reconnection.
 - A compact brightness popup next to the tray icon: click, adjust, and dismiss.
 - A separate preferences window for Settings and Schedule.
+- English, Russian, French, German, Spanish, and Italian interfaces, including tray menus and updates.
+- Saved light and dark themes, with immediate switching in Settings.
 - GitHub update checks and in-app download, verification, replacement, and restart.
 - Optional Windows autostart, launching quietly in the tray, and the app version in Settings.
 - Background DDC/CI operations, throttled writes, and automatic display topology detection.
@@ -45,7 +47,7 @@ Actual application screenshots captured in preview mode with simulated monitors.
 
 An ordinary launch controls your real monitors. **Preview** appears only when explicitly launched with `--demo`, which uses simulated displays. Exit the preview and run the executable without arguments to use real hardware.
 
-Launch `MultiMonitorBrightness-v0.2.5.exe`. Enable **DDC/CI** in your external monitor's on-screen menu if the display reports that brightness control is unavailable.
+Launch `MultiMonitorBrightness-v0.3.0.exe`. Enable **DDC/CI** in your external monitor's on-screen menu if the display reports that brightness control is unavailable.
 
 | Shortcut | Action |
 | --- | --- |
@@ -60,12 +62,20 @@ The shared slider sets linked displays to the same percentage; hotkeys and the t
 Click the tray icon to toggle the brightness popup. Press **Esc** or click outside it to dismiss. Open **Settings** or **Schedule** from the popup or the tray context menu. Preferences open beside the tray on the same monitor, with their native window frame kept inside the work area. Restoring a minimized preferences window returns it to the tray; switching tabs in an already open window preserves its position. Closing preferences keeps the utility running in the tray. Use **Quit** in the preferences footer or tray menu to exit.
 
 ```powershell
-.\MultiMonitorBrightness-v0.2.5.exe --demo
-.\MultiMonitorBrightness-v0.2.5.exe --portable
-.\MultiMonitorBrightness-v0.2.5.exe --settings
+.\MultiMonitorBrightness-v0.3.0.exe --demo
+.\MultiMonitorBrightness-v0.3.0.exe --portable
+.\MultiMonitorBrightness-v0.3.0.exe --settings
 ```
 
 Normally, settings live in `%APPDATA%\MultiMonitorBrightness\settings.json`. `--portable` stores `multi-monitor-brightness.json` beside the executable instead. The executable is self-contained; the JSON file holds your preferences. Demo mode neither reads nor writes these settings and does not register global shortcuts.
+
+## Language and appearance
+
+Open **Settings → Appearance** to choose **English**, **Русский**, **Français**, **Deutsch**, **Español**, or **Italiano**, and switch between **Light** and **Dark**. Changes apply immediately to preferences, the brightness popup, and application controls; the native tray menu updates its language immediately too. Windows controls the color of the native tray context menu and title bar.
+
+Both choices are saved automatically, including in portable mode. Existing settings migrate to English and the established dark theme while preserving brightness, schedules, shortcuts, and update preferences. Changing appearance does not change monitor brightness. Monitor model names, paths, Windows diagnostics, and published release notes retain their original text.
+
+Translations use the explicit English-key catalog in `src/locales.json`. English is the complete fallback. Catalog tests check that every translation is nonempty and preserves message arguments; settings tests cover older files and language/theme persistence.
 
 ## Windows startup
 
@@ -143,7 +153,7 @@ Settings are written to a same-directory temporary file, synced, then replaced. 
 
 ## Status
 
-Current version: 0.2.5. Automated tests cover brightness scaling, schedule boundaries, shortcut validation, persistence, queued monitor operations, popup placement, release selection, and update verification. Hardware compatibility is not yet certified.
+Current version: 0.3.0. Automated tests cover brightness scaling, schedule boundaries, shortcut validation, persistence, queued monitor operations, popup placement, release selection, and update verification. Hardware compatibility is not yet certified.
 
 Live-window regression checks the brightness popup, separate preferences, reopening and minimizing windows, hidden brightness commands, background dimming/restoration, and Quit. Run `scripts\test-tray.ps1` and `scripts\test-tray.ps1 -Startup` on an interactive Windows desktop. The checks use simulated monitors and the installed menu callback, without injecting mouse/keyboard input or changing physical brightness.
 
