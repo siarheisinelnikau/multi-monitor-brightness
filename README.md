@@ -18,9 +18,13 @@ Actual application screenshots captured in preview mode with simulated monitors.
 
 ![Brightness popup with shared and individual monitor sliders](docs/screenshots/brightness.png)
 
-**Settings:** installed version, update checks, Windows startup, and keyboard shortcuts.
+**Settings:** language, theme, installed version, update checks, and Windows startup. Scroll for keyboard shortcuts.
 
-![Settings window with Updates, Application, and Keyboard shortcuts](docs/screenshots/settings.png)
+![Settings window with Appearance, Updates, and Application controls](docs/screenshots/settings.png)
+
+**Light theme and Russian:** the same real Settings screen with immediate language and appearance preferences.
+
+![Russian Settings window with the light theme selected](docs/screenshots/settings-light-russian.png)
 
 **Schedule:** configure evening dimming and morning brightness restoration.
 
@@ -154,6 +158,8 @@ Settings are written to a same-directory temporary file, synced, then replaced. 
 ## Status
 
 Current version: 0.3.0. Automated tests cover brightness scaling, schedule boundaries, shortcut validation, persistence, queued monitor operations, popup placement, release selection, and update verification. Hardware compatibility is not yet certified.
+
+The [0.3.0 verification notes](docs/verification-v0.3.0.md) record localization/settings tests, real screenshots in both themes, optimized renderer measurements, native tray callback checks, and remaining hardware/manual scope.
 
 Live-window regression checks the brightness popup, separate preferences, reopening and minimizing windows, hidden brightness commands, background dimming/restoration, and Quit. Run `scripts\test-tray.ps1` and `scripts\test-tray.ps1 -Startup` on an interactive Windows desktop. The checks use simulated monitors and the installed menu callback, without injecting mouse/keyboard input or changing physical brightness.
 
