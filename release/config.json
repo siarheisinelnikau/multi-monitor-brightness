@@ -1,0 +1,20 @@
+{
+  "repository": "siarheisinelnikau/multi-monitor-brightness",
+  "product": "MultiMonitorBrightness",
+  "kind": "desktop",
+  "assets": [
+    {
+      "name": "LICENSE",
+      "repository_file": "LICENSE"
+    },
+    {
+      "name": "MultiMonitorBrightness-v{version}.exe"
+    },
+    {
+      "name": "THIRD_PARTY_NOTICES.txt",
+      "repository_file": "THIRD_PARTY_NOTICES.txt"
+    }
+  ],
+  "notices": false,
+  "checksum_aliases": []
+}
