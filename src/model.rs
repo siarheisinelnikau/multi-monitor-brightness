@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 pub struct Settings {
     pub language: crate::i18n::Language,
     pub theme: crate::theme::Theme,
+    pub reduced_motion: bool,
+    pub profiles: Vec<crate::profiles::Profile>,
     pub restore_on_start: bool,
     pub close_to_tray: bool,
     pub step: u8,
@@ -21,6 +23,8 @@ impl Default for Settings {
         Self {
             language: crate::i18n::Language::default(),
             theme: crate::theme::Theme::default(),
+            reduced_motion: false,
+            profiles: Vec::new(),
             restore_on_start: true,
             close_to_tray: true,
             step: 5,
@@ -43,6 +47,7 @@ impl Settings {
         self.schedule.morning %= 1440;
         self.schedule.duration = self.schedule.duration.clamp(1, 240);
         self.schedule.target = self.schedule.target.min(100);
+        crate::profiles::normalize(&mut self.profiles);
     }
 }
 
@@ -271,6 +276,48 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&disabled).unwrap()).unwrap();
         assert!(!loaded.check_updates_automatically);
         assert_eq!(loaded.last_update_check, 123);
+    }
+
+    #[test]
+    fn profile_and_motion_migration_preserves_existing_schedule_appearance_and_update_opt_out() {
+        let mut old: Settings = serde_json::from_str(
+            r#"{
+            "language":"ru", "theme":"light", "step":7,
+            "check_updates_automatically":false,
+            "monitors":{"path-a":{"brightness":68,"included":false}},
+            "schedule":{"enabled":true,"start":1260,"target":18}
+        }"#,
+        )
+        .unwrap();
+        old.normalize();
+        assert!(old.profiles.is_empty());
+        assert!(!old.reduced_motion);
+        old.reduced_motion = true;
+        old.profiles.push(crate::profiles::Profile {
+            id: 3,
+            name: "Чтение".into(),
+            monitors: [(
+                "path-a".into(),
+                crate::profiles::Level {
+                    name: "Écran".into(),
+                    brightness: 34,
+                    included: true,
+                },
+            )]
+            .into(),
+        });
+        let mut loaded: Settings =
+            serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        loaded.normalize();
+        assert_eq!(loaded.profiles, old.profiles);
+        assert!(loaded.reduced_motion);
+        assert_eq!(loaded.language, crate::i18n::Language::Russian);
+        assert_eq!(loaded.theme, crate::theme::Theme::Light);
+        assert_eq!(loaded.schedule, old.schedule);
+        assert_eq!(loaded.monitors["path-a"].brightness, 68);
+        assert!(!loaded.monitors["path-a"].included);
+        assert!(!loaded.check_updates_automatically);
+        assert_eq!(loaded.hotkeys, old.hotkeys);
     }
 
     #[test]

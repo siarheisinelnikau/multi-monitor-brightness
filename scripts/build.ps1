@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
 Push-Location (Split-Path -Parent $PSScriptRoot)
 try {
-    cargo build --release --locked --target x86_64-pc-windows-msvc
+    cargo build --release --locked --jobs 2 --target-dir target --target x86_64-pc-windows-msvc
     if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
     $outputDirectory = Join-Path (Get-Location) 'dist'
     New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null

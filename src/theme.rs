@@ -141,6 +141,14 @@ pub fn palette(ui: &egui::Ui) -> Palette {
     .palette()
 }
 
+pub fn motion(ctx: &egui::Context, reduced: bool) {
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        let mut style = (*ctx.style_of(theme)).clone();
+        style.animation_time = if reduced { 0.0 } else { 0.16 };
+        ctx.set_style_of(theme, style);
+    }
+}
+
 pub fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
     let p = palette(ui);
     egui::Frame::new()

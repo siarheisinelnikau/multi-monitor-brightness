@@ -14,7 +14,9 @@ mod i18n;
 mod icon;
 mod model;
 mod monitors;
+mod motion;
 mod platform;
+mod profiles;
 mod startup;
 mod theme;
 mod update_panel;
@@ -102,7 +104,7 @@ fn run() -> Result<(), String> {
             return Err("Self-capture requires --demo to isolate hardware and preferences.".into());
         }
         if let Ok(tab) = std::env::var("MMB_CAPTURE_TAB")
-            && !["popup", "settings", "schedule"].contains(&tab.as_str())
+            && !["popup", "settings", "schedule", "profiles"].contains(&tab.as_str())
         {
             return Err(format!("Unsupported capture screen: {tab}"));
         }

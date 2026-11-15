@@ -1,0 +1,13 @@
+[package]
+name = "rust-auto-updator-egui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+repository = "https://github.com/siarheisinelnikau/rust-auto-updator"
+description = "Localized egui update panel and optional shared light and dark themes"
+readme = "README.md"
+
+[dependencies]
+rust-auto-updator = { version = "0.1.0", path = "../rust-auto-updator" }
+egui = { version = "=0.37.0", default-features = false }

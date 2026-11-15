@@ -53,3 +53,43 @@ pub fn cleanup_after_update(directory: PathBuf) {
 pub fn smoke_cli(arguments: &[std::ffi::OsString]) -> Result<bool, String> {
     rust_auto_updator::smoke_cli(arguments, &config(false)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_product_assets_and_portable_restart_arguments_are_preserved() {
+        let mut config = config(true).unwrap();
+        config.current_version = "0.3.0".parse().unwrap();
+        let asset = "MultiMonitorBrightness-v0.4.0.exe";
+        let root = format!("{}/releases/download/v0.4.0", config.repository_url());
+        let mut fixture = serde_json::json!({
+            "tag_name":"v0.4.0", "html_url":format!("{}/releases/tag/v0.4.0", config.repository_url()),
+            "draft":false, "prerelease":false,
+            "assets":[
+                {"name":asset, "browser_download_url":format!("{root}/{asset}"), "size":4096},
+                {"name":"SHA256SUMS.txt", "browser_download_url":format!("{root}/SHA256SUMS.txt"), "size":100}
+            ]
+        });
+        let release = rust_auto_updator::parse_release(&fixture.to_string(), &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.executable_name(), asset);
+        assert_eq!(
+            config.api_url(),
+            "https://api.github.com/repos/siarheisinelnikau/multi-monitor-brightness/releases/latest"
+        );
+        assert_eq!(
+            config.install.restart_args,
+            ["--settings", "--updated", "--portable"]
+        );
+        assert_eq!(config.install.rollback_args, ["--startup", "--portable"]);
+        fixture["assets"][0]["name"] = "DifferentProduct-v0.4.0.exe".into();
+        assert!(rust_auto_updator::parse_release(&fixture.to_string(), &config).is_err());
+        fixture["assets"][0]["name"] = asset.into();
+        fixture["assets"][0]["browser_download_url"] =
+            "https://github.com/another/project/releases/download/v0.4.0/tool.exe".into();
+        assert!(rust_auto_updator::parse_release(&fixture.to_string(), &config).is_err());
+    }
+}

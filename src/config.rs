@@ -67,8 +67,25 @@ mod tests {
         let mut s = Settings::default();
         save(&path, &s).unwrap();
         s.step = 9;
+        s.reduced_motion = true;
+        s.profiles.push(crate::profiles::Profile {
+            id: 1,
+            name: "Reading".into(),
+            monitors: [(
+                "monitor-path".into(),
+                crate::profiles::Level {
+                    name: "Display".into(),
+                    brightness: 43,
+                    included: false,
+                },
+            )]
+            .into(),
+        });
         save(&path, &s).unwrap();
-        assert_eq!(load(&path).unwrap().step, 9);
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.step, 9);
+        assert!(loaded.reduced_motion);
+        assert_eq!(loaded.profiles, s.profiles);
         fs::write(&path, b"broken JSON").unwrap();
         assert!(load(&path).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"broken JSON");

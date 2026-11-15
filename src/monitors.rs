@@ -67,7 +67,11 @@ impl Controller {
                         match if demo { Ok(demo_devices()) } else { discover() } {
                             Ok(found) => {
                                 devices = found;
-                                signature = topology().unwrap_or_default();
+                                signature = if demo {
+                                    Vec::new()
+                                } else {
+                                    topology().unwrap_or_default()
+                                };
                                 emit(Event::Scanned(Ok(devices
                                     .iter()
                                     .map(|d| d.info.clone())
@@ -78,7 +82,14 @@ impl Controller {
                         refresh = false;
                         last_probe = Instant::now();
                     }
-                    let first = match receiver.recv_timeout(Duration::from_millis(100)) {
+                    // Commands wake this wait immediately. Idle probing needs one wake
+                    // per topology deadline, rather than ten empty wakeups per second.
+                    let wait = if demo {
+                        Duration::from_secs(30)
+                    } else {
+                        Duration::from_secs(5).saturating_sub(last_probe.elapsed())
+                    };
+                    let first = match receiver.recv_timeout(wait) {
                         Ok(command) => Some(command),
                         Err(mpsc::RecvTimeoutError::Timeout) => None,
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -99,7 +110,12 @@ impl Controller {
                     }
                     // Keep only the newest queued value per monitor. DDC calls can take 50+ ms.
                     for (id, (value, revision)) in pending {
+                        let unique = devices.iter().filter(|d| d.info.id == id).count() == 1;
                         let result = match devices.iter_mut().find(|d| d.info.id == id) {
+                            Some(_) if !unique => Err(
+                                "Display identity is ambiguous. Refresh displays and try again."
+                                    .into(),
+                            ),
                             Some(device) => device.set(value),
                             None => {
                                 Err("Display disconnected. Refresh displays and try again.".into())

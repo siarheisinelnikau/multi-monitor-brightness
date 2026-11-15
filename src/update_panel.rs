@@ -6,7 +6,12 @@ use crate::{
 use egui::RichText;
 use rust_auto_updator::{Controller, State};
 
-pub fn show(ui: &mut egui::Ui, updates: &mut Controller, check_on_startup: &mut bool) -> bool {
+pub fn show(
+    ui: &mut egui::Ui,
+    updates: &mut Controller,
+    check_on_startup: &mut bool,
+    reduced_motion: bool,
+) -> bool {
     let mut changed = false;
     card(ui, |ui| {
         ui.horizontal_wrapped(|ui| {
@@ -46,7 +51,9 @@ pub fn show(ui: &mut egui::Ui, updates: &mut Controller, check_on_startup: &mut 
             }
             State::Checking => {
                 ui.horizontal(|ui| {
-                    ui.spinner();
+                    if !reduced_motion {
+                        ui.spinner();
+                    }
                     ui.label(tr(ui, "Checking GitHub…"));
                 });
             }
@@ -88,7 +95,7 @@ pub fn show(ui: &mut egui::Ui, updates: &mut Controller, check_on_startup: &mut 
                 ui.add(
                     egui::ProgressBar::new(progress)
                         .show_percentage()
-                        .animate(true),
+                        .animate(!reduced_motion),
                 );
                 ui.label(tr(ui, "Downloading and verifying SHA-256…"));
             }

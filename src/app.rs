@@ -3,6 +3,7 @@ use crate::{
     model::{self, Hotkey, Hotkeys, MonitorMemory, Settings},
     monitors::{self, Command, MonitorInfo},
     platform::{self, Action, HotkeyEvent},
+    profiles::{self, Availability, Outcome},
     startup, updater,
 };
 use egui::{self, Color32, FontId, RichText, Stroke, Vec2};
@@ -15,6 +16,9 @@ use std::{
 #[cfg(feature = "tray-smoke-test")]
 #[path = "tray_smoke.rs"]
 mod tray_smoke;
+
+#[path = "profile_ui.rs"]
+mod profile_ui;
 
 use crate::{
     i18n::{self, Language, tr},
@@ -34,6 +38,7 @@ struct Display {
 
 #[derive(PartialEq)]
 enum Tab {
+    Profiles,
     Evening,
     Settings,
 }
@@ -59,6 +64,13 @@ pub struct MultiMonitorBrightness {
     popup_focus_pending: bool,
     popup_anchor: Option<platform::Anchor>,
     popup_details: bool,
+    selected_profile: Option<u64>,
+    profile_editor: Option<profiles::Profile>,
+    profile_name: String,
+    profile_error: Option<&'static str>,
+    profile_feedback: Option<&'static str>,
+    profile_delete_pending: Option<u64>,
+    profile_application: Option<profiles::Application>,
     updates: updater::Controller,
     prepared_update: Option<updater::Prepared>,
     monitors: Option<monitors::Controller>,
@@ -140,6 +152,7 @@ impl MultiMonitorBrightness {
                 settings.language.text("Preferences")
             )));
         theme::initialize(&cc.egui_ctx, settings.theme);
+        theme::motion(&cc.egui_ctx, settings.reduced_motion);
         let monitors = match monitors::Controller::new(cc.egui_ctx.clone(), demo) {
             Ok(service) => Some(service),
             Err(error) => {
@@ -222,6 +235,13 @@ impl MultiMonitorBrightness {
             popup_focus_pending: popup_open && std::env::var_os("MMB_CAPTURE_TO").is_none(),
             popup_anchor,
             popup_details: false,
+            selected_profile: None,
+            profile_editor: None,
+            profile_name: String::new(),
+            profile_error: None,
+            profile_feedback: None,
+            profile_delete_pending: None,
+            profile_application: None,
             updates,
             prepared_update: None,
             monitors,
@@ -249,6 +269,12 @@ impl MultiMonitorBrightness {
                 app.monitor_event(event);
             }
             match std::env::var("MMB_CAPTURE_TAB").as_deref() {
+                Ok("profiles") => {
+                    app.save_current_profile("Reading", Some(38));
+                    app.tab = Tab::Profiles;
+                    app.preferences_open = true;
+                    app.popup_open = false;
+                }
                 Ok("schedule") => {
                     app.tab = Tab::Evening;
                     app.preferences_open = true;
@@ -313,6 +339,12 @@ impl MultiMonitorBrightness {
         {
             return;
         }
+        if let Some(application) = &mut self.profile_application
+            && let Some((_, outcome)) = application.outcomes.get_mut(&display.info.id)
+            && matches!(outcome, Outcome::Pending { .. })
+        {
+            *outcome = Outcome::Superseded;
+        }
         self.revision += 1;
         display.value = value;
         display.revision = self.revision;
@@ -356,6 +388,7 @@ impl MultiMonitorBrightness {
         let Some(controller) = &self.monitors else {
             return;
         };
+        let mut failures = Vec::new();
         for display in &mut self.displays {
             if display
                 .queued
@@ -372,6 +405,7 @@ impl MultiMonitorBrightness {
                         display.writing = true;
                     }
                     Err(_) => {
+                        failures.push((display.info.id.clone(), display.revision));
                         display.queued = None;
                         display.writing = false;
                         display.error = Some(
@@ -381,6 +415,9 @@ impl MultiMonitorBrightness {
                     }
                 }
             }
+        }
+        for (id, revision) in failures {
+            self.profile_written(&id, revision, false);
         }
     }
 
@@ -441,6 +478,7 @@ impl MultiMonitorBrightness {
                 revision,
                 result,
             } => {
+                self.profile_written(&id, revision, result.is_ok());
                 if let Some(display) = self.displays.iter_mut().find(|d| d.info.id == id) {
                     let manual = display.manual.contains(&revision);
                     display.manual.retain(|r| *r > revision);
@@ -470,6 +508,17 @@ impl MultiMonitorBrightness {
     }
 
     fn merge_displays(&mut self, infos: Vec<MonitorInfo>) {
+        if let Some(application) = &mut self.profile_application {
+            for (id, (_, outcome)) in &mut application.outcomes {
+                if matches!(outcome, Outcome::Pending { .. })
+                    && !infos
+                        .iter()
+                        .any(|info| info.id == *id && info.brightness.is_some())
+                {
+                    *outcome = Outcome::Missing;
+                }
+            }
+        }
         let mut old = std::mem::take(&mut self.displays);
         let mut restore = Vec::new();
         for info in infos {
@@ -656,6 +705,7 @@ impl MultiMonitorBrightness {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             for (tab, label) in [
+                (Tab::Profiles, tr(ui, "Profiles")),
                 (Tab::Evening, tr(ui, "Schedule")),
                 (Tab::Settings, tr(ui, "Settings")),
             ] {
@@ -711,7 +761,12 @@ impl MultiMonitorBrightness {
                 });
             });
             let mut value = average;
-            let response = brightness_slider(ui, &mut value, ui.available_width());
+            let response = brightness_slider(
+                ui,
+                &mut value,
+                ui.available_width(),
+                self.settings.reduced_motion,
+            );
             #[cfg(feature = "render-smoke-test")]
             {
                 let viewport = ui.ctx().viewport_id();
@@ -732,7 +787,9 @@ impl MultiMonitorBrightness {
         if self.displays.is_empty() {
             if self.scanning {
                 ui.horizontal(|ui| {
-                    ui.spinner();
+                    if !self.settings.reduced_motion {
+                        ui.spinner();
+                    }
                     ui.label(tr(ui, "Finding displays…"));
                 });
             } else {
@@ -795,6 +852,13 @@ impl MultiMonitorBrightness {
                             ))
                             .changed()
                         {
+                            if let Some(application) = &mut self.profile_application
+                                && let Some((_, outcome)) =
+                                    application.outcomes.get_mut(&self.displays[i].info.id)
+                                && matches!(outcome, Outcome::Pending { .. })
+                            {
+                                *outcome = Outcome::Superseded;
+                            }
                             self.dirty();
                         }
                     }
@@ -803,7 +867,14 @@ impl MultiMonitorBrightness {
                     });
                 });
                 let mut value = self.displays[i].value;
-                if brightness_slider(ui, &mut value, ui.available_width()).changed() {
+                if brightness_slider(
+                    ui,
+                    &mut value,
+                    ui.available_width(),
+                    self.settings.reduced_motion,
+                )
+                .changed()
+                {
                     self.pause_schedule();
                     self.queue(i, value, true);
                 }
@@ -812,6 +883,12 @@ impl MultiMonitorBrightness {
                         RichText::new(i18n::message(ui, error))
                             .size(11.0)
                             .color(palette(ui).warm),
+                    );
+                } else if self.displays[i].queued.is_some() || self.displays[i].writing {
+                    ui.label(
+                        RichText::new(tr(ui, "Changing brightness…"))
+                            .size(11.0)
+                            .color(palette(ui).accent),
                     );
                 }
                 ui.add_space(10.0);
@@ -910,7 +987,10 @@ impl MultiMonitorBrightness {
                 let footer = 32.0;
                 egui::ScrollArea::vertical()
                     .max_height((ui.available_height() - footer).max(40.0))
-                    .show(ui, |ui| self.displays_ui(ui));
+                    .show(ui, |ui| {
+                        self.quick_profiles_ui(ui);
+                        self.displays_ui(ui);
+                    });
                 ui.add_space(4.0);
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -952,7 +1032,7 @@ impl MultiMonitorBrightness {
         #[cfg(feature = "ui-capture")]
         if !matches!(
             std::env::var("MMB_CAPTURE_TAB").as_deref(),
-            Ok("settings" | "schedule")
+            Ok("settings" | "schedule" | "profiles")
         ) {
             self.capture(&ctx);
         }
@@ -967,7 +1047,10 @@ impl MultiMonitorBrightness {
         let linked = (0..self.displays.len())
             .filter(|i| self.included(*i))
             .count();
-        let mut height = 108.0 + supported.max(1) as f32 * if supported > 1 { 96.0 } else { 70.0 };
+        let mut height = 206.0 + supported.max(1) as f32 * if supported > 1 { 96.0 } else { 70.0 };
+        if self.profile_application.is_some() {
+            height += 56.0;
+        }
         if linked > 1 {
             height += 84.0;
         }
@@ -1075,6 +1158,7 @@ impl MultiMonitorBrightness {
     fn appearance_ui(&mut self, ui: &mut egui::Ui) {
         let previous_language = self.settings.language;
         let previous_theme = self.settings.theme;
+        let previous_motion = self.settings.reduced_motion;
         card(ui, |ui| {
             ui.label(RichText::new(tr(ui, "Appearance")).size(17.0).strong());
             ui.add_space(10.0);
@@ -1106,6 +1190,12 @@ impl MultiMonitorBrightness {
                     ui.end_row();
                 });
             ui.add_space(8.0);
+            ui.checkbox(&mut self.settings.reduced_motion, tr(ui, "Reduce motion"))
+                .on_hover_text(tr(
+                    ui,
+                    "Use immediate transitions instead of slider and selection animations.",
+                ));
+            ui.add_space(8.0);
             ui.label(
                 RichText::new(tr(ui, "Language and theme changes apply immediately."))
                     .size(11.0)
@@ -1129,7 +1219,13 @@ impl MultiMonitorBrightness {
         if previous_theme != self.settings.theme {
             self.settings.theme.apply(ui.ctx());
         }
-        if previous_language != self.settings.language || previous_theme != self.settings.theme {
+        if previous_motion != self.settings.reduced_motion {
+            theme::motion(ui.ctx(), self.settings.reduced_motion);
+        }
+        if previous_language != self.settings.language
+            || previous_theme != self.settings.theme
+            || previous_motion != self.settings.reduced_motion
+        {
             self.dirty();
         }
     }
@@ -1421,6 +1517,7 @@ impl MultiMonitorBrightness {
             ui,
             &mut self.updates,
             &mut self.settings.check_updates_automatically,
+            self.settings.reduced_motion,
         ) {
             self.dirty();
         }
@@ -1618,6 +1715,7 @@ impl MultiMonitorBrightness {
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         match self.tab {
+                            Tab::Profiles => self.profiles_ui(ui),
                             Tab::Evening => self.evening_ui(ui),
                             Tab::Settings => self.settings_ui(ui),
                         }
@@ -1626,7 +1724,7 @@ impl MultiMonitorBrightness {
         #[cfg(feature = "ui-capture")]
         if matches!(
             std::env::var("MMB_CAPTURE_TAB").as_deref(),
-            Ok("settings" | "schedule")
+            Ok("settings" | "schedule" | "profiles")
         ) {
             self.capture(ctx);
         }
@@ -1654,7 +1752,12 @@ fn sun(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: Color32)
     }
 }
 
-fn brightness_slider(ui: &mut egui::Ui, value: &mut u8, width: f32) -> egui::Response {
+fn brightness_slider(
+    ui: &mut egui::Ui,
+    value: &mut u8,
+    width: f32,
+    reduced_motion: bool,
+) -> egui::Response {
     let (rect, mut response) = ui.allocate_exact_size(
         Vec2::new(width.max(60.0), 28.0),
         egui::Sense::click_and_drag(),
@@ -1694,18 +1797,35 @@ fn brightness_slider(ui: &mut egui::Ui, value: &mut u8, width: f32) -> egui::Res
         egui::WidgetInfo::slider(ui.is_enabled(), *value as f64, tr(ui, "Brightness"))
     });
     let y = track.center().y;
-    let x = egui::lerp(track.x_range(), *value as f32 / 100.0);
+    let visible = ui.is_rect_visible(rect);
+    let position = crate::motion::value(
+        ui,
+        response.id.with("position"),
+        *value as f32,
+        reduced_motion || response.dragged() || !visible,
+    );
+    let hover = crate::motion::value(
+        ui,
+        response.id.with("hover"),
+        if response.hovered() || response.has_focus() {
+            1.0
+        } else {
+            0.0
+        },
+        reduced_motion || !visible,
+    );
+    let x = egui::lerp(track.x_range(), position / 100.0);
     ui.painter().line_segment(
         [egui::pos2(track.left(), y), egui::pos2(track.right(), y)],
         Stroke::new(4.0, palette(ui).track),
     );
     ui.painter().line_segment(
         [egui::pos2(track.left(), y), egui::pos2(x, y)],
-        Stroke::new(4.0, palette(ui).accent),
+        Stroke::new(4.0 + hover, palette(ui).accent),
     );
     ui.painter().circle_filled(
         egui::pos2(x, y),
-        if response.dragged() { 7.0 } else { 6.0 },
+        if response.dragged() { 7.0 } else { 6.0 + hover },
         palette(ui).text,
     );
     if response.has_focus() {
@@ -1842,6 +1962,13 @@ mod tests {
             popup_focus_pending: false,
             popup_anchor: None,
             popup_details: false,
+            selected_profile: None,
+            profile_editor: None,
+            profile_name: String::new(),
+            profile_error: None,
+            profile_feedback: None,
+            profile_delete_pending: None,
+            profile_application: None,
             updates: updater::Controller::disabled(crate::VERSION, "Preview mode"),
             prepared_update: None,
             monitors: None,
@@ -1998,5 +2125,346 @@ mod tests {
         assert!(app.displays[0].queued.is_none());
         assert_eq!(app.displays[1].value, 33);
         assert!(app.displays[1].queued.is_some());
+    }
+
+    fn saved(app: &mut MultiMonitorBrightness) -> u64 {
+        app.save_current_profile("Reading", Some(35));
+        assert!(app.profile_error.is_none());
+        app.selected_profile.unwrap()
+    }
+
+    fn acknowledge(app: &mut MultiMonitorBrightness, index: usize, result: Result<(), String>) {
+        let d = &mut app.displays[index];
+        d.queued = None;
+        let event = monitors::Event::Written {
+            id: d.info.id.clone(),
+            value: d.value,
+            revision: d.revision,
+            result,
+        };
+        app.monitor_event(event);
+    }
+
+    #[test]
+    fn saving_and_editing_profiles_never_queue_hardware_changes() {
+        let mut app = app();
+        app.settings.monitors.get_mut("b").unwrap().included = false;
+        app.save_current_profile("  Reading  ", None);
+        let profile = &app.settings.profiles[0];
+        assert_eq!(profile.name, "Reading");
+        assert_eq!(profile.monitors["a"].brightness, 72);
+        assert!(!profile.monitors["b"].included);
+        assert!(!profile.monitors.contains_key("c"));
+        assert_eq!(app.revision, 0);
+        app.profile_editor.as_mut().unwrap().name = "Evening".into();
+        app.profile_editor
+            .as_mut()
+            .unwrap()
+            .monitors
+            .get_mut("a")
+            .unwrap()
+            .brightness = 18;
+        app.save_profile_edits(false);
+        assert_eq!(app.settings.profiles[0].name, "Evening");
+        assert_eq!(app.settings.profiles[0].monitors["a"].brightness, 18);
+        assert_eq!(app.revision, 0);
+        app.queue(0, 30, true);
+        app.save_current_profile("Pending", None);
+        assert_eq!(app.settings.profiles.len(), 1);
+        assert!(app.profile_error.is_some());
+    }
+
+    #[test]
+    fn profile_application_handles_reorder_partial_failure_and_confirmed_link_membership() {
+        let mut app = app();
+        let id = saved(&mut app);
+        app.settings.profiles[0]
+            .monitors
+            .get_mut("b")
+            .unwrap()
+            .included = false;
+        app.displays.swap(0, 1);
+        app.apply_profile_at(id, 10, 12 * 60);
+        assert_eq!(app.displays[0].info.id, "b");
+        assert_eq!(app.displays[0].value, 35);
+        assert!(
+            app.settings.monitors["b"].included,
+            "link changes wait for successful writes"
+        );
+        acknowledge(&mut app, 0, Ok(()));
+        acknowledge(&mut app, 1, Err("Fake DDC failure".into()));
+        assert_eq!(app.settings.monitors["b"].brightness, 35);
+        assert!(!app.settings.monitors["b"].included);
+        assert_eq!(app.settings.monitors["a"].brightness, 72);
+        assert_eq!(app.displays[1].value, 72);
+        let result = app.profile_application.as_ref().unwrap();
+        assert_eq!(
+            (result.applied(), result.skipped(), result.pending()),
+            (1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn profiles_skip_missing_unsupported_and_unrelated_displays_without_deferred_application() {
+        let mut app = app();
+        let id = saved(&mut app);
+        app.settings.profiles[0].monitors.insert(
+            "c".into(),
+            profiles::Level {
+                name: "Unsupported".into(),
+                brightness: 10,
+                included: true,
+            },
+        );
+        let old_a = app.displays[0].info.clone();
+        let b = app.displays[1].info.clone();
+        let c = app.displays[2].info.clone();
+        app.merge_displays(vec![
+            MonitorInfo {
+                id: "new".into(),
+                name: "New".into(),
+                detail: String::new(),
+                brightness: Some(91),
+            },
+            b,
+            c,
+        ]);
+        app.apply_profile_at(id, 10, 12 * 60);
+        assert_eq!(app.displays[0].value, 91);
+        assert!(app.displays[0].queued.is_none());
+        let result = app.profile_application.as_ref().unwrap();
+        assert_eq!(result.outcomes["a"].1, Outcome::Missing);
+        assert_eq!(result.outcomes["c"].1, Outcome::Unsupported);
+        let mut reconnect: Vec<_> = app.displays.iter().map(|d| d.info.clone()).collect();
+        reconnect.push(old_a);
+        app.merge_displays(reconnect);
+        assert_eq!(
+            app.displays.last().unwrap().value,
+            72,
+            "reconnection uses existing manual memory, not a skipped profile"
+        );
+    }
+
+    #[test]
+    fn manual_override_cancels_pending_profile_link_changes() {
+        let mut app = app();
+        let id = saved(&mut app);
+        app.settings.profiles[0]
+            .monitors
+            .get_mut("a")
+            .unwrap()
+            .included = false;
+        app.apply_profile_at(id, 10, 12 * 60);
+        let revision = app.displays[0].revision;
+        app.queue(0, 65, true);
+        app.monitor_event(monitors::Event::Written {
+            id: "a".into(),
+            value: 35,
+            revision,
+            result: Ok(()),
+        });
+        assert_eq!(app.displays[0].value, 65);
+        assert!(app.settings.monitors["a"].included);
+        assert_eq!(
+            app.profile_application.as_ref().unwrap().outcomes["a"].1,
+            Outcome::Superseded
+        );
+    }
+
+    #[test]
+    fn applying_identical_profile_levels_still_sets_manual_memory_and_pauses_the_evening() {
+        let mut app = app();
+        app.settings.schedule.enabled = true;
+        app.schedule_at(10, 21 * 60);
+        acknowledge(&mut app, 0, Ok(()));
+        acknowledge(&mut app, 1, Ok(()));
+        assert_eq!(app.settings.monitors["a"].brightness, 72);
+        app.save_current_profile("Night", None);
+        let id = app.selected_profile.unwrap();
+        let revision = app.revision;
+        app.apply_profile_at(id, 10, 22 * 60);
+        assert_eq!(app.paused_cycle, Some(10));
+        assert_eq!(
+            app.revision, revision,
+            "matching confirmed targets require no extra writes"
+        );
+        assert_eq!(app.settings.monitors["a"].brightness, 25);
+        app.schedule_at(11, 8 * 60);
+        assert_eq!(app.displays[0].value, 25);
+        assert!(app.settings.schedule.enabled);
+    }
+
+    #[test]
+    fn profile_commands_coalesce_and_visual_animation_never_generates_ddc_writes() {
+        let mut app = app();
+        let id = saved(&mut app);
+        let (commands, received) = std::sync::mpsc::channel();
+        let (_, events) = std::sync::mpsc::channel();
+        app.monitors = Some(monitors::Controller { commands, events });
+        app.apply_profile_at(id, 10, 12 * 60);
+        app.settings.profiles[0]
+            .monitors
+            .get_mut("a")
+            .unwrap()
+            .brightness = 15;
+        app.apply_profile_at(id, 10, 12 * 60);
+        app.flush(true);
+        let commands: Vec<_> = received.try_iter().collect();
+        assert_eq!(commands.len(), 2);
+        assert!(matches!(&commands[0], Command::Set { id, value: 15, .. } if id == "a"));
+        let revision = app.revision;
+        let ctx = egui::Context::default();
+        theme::initialize(&ctx, Theme::Dark);
+        for frame in 0..25 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(frame as f64 / 60.0),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(360.0, 640.0),
+                    )),
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| app.displays_ui(ui));
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(app.revision, revision);
+        assert_eq!(received.try_iter().count(), 0);
+    }
+
+    #[test]
+    fn stopped_worker_finishes_profile_with_failure_and_keeps_previous_memory() {
+        let mut app = app();
+        let id = saved(&mut app);
+        let (commands, receiver) = std::sync::mpsc::channel();
+        drop(receiver);
+        let (_, events) = std::sync::mpsc::channel();
+        app.monitors = Some(monitors::Controller { commands, events });
+        app.apply_profile_at(id, 10, 12 * 60);
+        app.flush(true);
+        let result = app.profile_application.as_ref().unwrap();
+        assert_eq!(
+            (result.pending(), result.applied(), result.skipped()),
+            (0, 0, 2)
+        );
+        assert_eq!(app.settings.monitors["a"].brightness, 72);
+    }
+
+    #[test]
+    fn profile_editor_and_popup_layout_are_safe_in_every_language_and_theme() {
+        for language in Language::ALL {
+            for selected_theme in [Theme::Light, Theme::Dark] {
+                let mut app = app();
+                saved(&mut app);
+                app.settings.profiles[0].name = "W".repeat(40);
+                app.profile_editor = None;
+                let ctx = egui::Context::default();
+                language.install(&ctx);
+                theme::initialize(&ctx, selected_theme);
+                for frame in 0..3 {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            time: Some(frame as f64 / 60.0),
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                Vec2::new(500.0, 760.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |root| {
+                            egui::CentralPanel::default().show(root, |ui| {
+                                let width = ui.available_width();
+                                app.profiles_ui(ui);
+                                assert!(ui.min_rect().width() <= width + 1.0,
+                                    "profile editor overflow: {language:?} {selected_theme:?} {} > {width}", ui.min_rect().width());
+                            });
+                        },
+                    );
+                    output.textures_delta.clear();
+                }
+                for frame in 3..6 {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            time: Some(frame as f64 / 60.0),
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                Vec2::new(360.0, 640.0),
+                            )),
+                            ..Default::default()
+                        },
+                        |root| {
+                            egui::CentralPanel::default().show(root, |ui| {
+                                let width = ui.available_width();
+                                app.quick_profiles_ui(ui);
+                                app.displays_ui(ui);
+                                assert!(
+                                    ui.min_rect().width() <= width + 1.0,
+                                    "popup overflow: {language:?} {selected_theme:?} {} > {width}",
+                                    ui.min_rect().width()
+                                );
+                            });
+                        },
+                    );
+                    output.textures_delta.clear();
+                }
+                assert_eq!(
+                    app.revision, 0,
+                    "headless layout must never change hardware"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cosmetic_slider_frames_end_after_the_value_and_hover_settle() {
+        for reduced in [false, true] {
+            let ctx = egui::Context::default();
+            theme::initialize(&ctx, Theme::Dark);
+            theme::motion(&ctx, reduced);
+            let mut value = 20;
+            let mut animated_frames = 0;
+            for frame in 0..40 {
+                if frame == 2 {
+                    value = 80;
+                }
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        time: Some(frame as f64 / 60.0),
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            Vec2::new(360.0, 100.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            brightness_slider(ui, &mut value, 320.0, reduced);
+                        });
+                    },
+                );
+                let repaint = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+                if frame > 2 && frame < 12 && repaint != Duration::MAX {
+                    animated_frames += 1;
+                }
+                if frame >= 30 {
+                    assert_eq!(
+                        repaint,
+                        Duration::MAX,
+                        "settled widgets must stop requesting frames"
+                    );
+                }
+                output.textures_delta.clear();
+            }
+            if !reduced {
+                assert!(animated_frames > 0);
+            }
+            assert_eq!(
+                value, 80,
+                "visual interpolation must never modify the target"
+            );
+        }
     }
 }
